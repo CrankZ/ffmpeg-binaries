@@ -38,7 +38,7 @@ check_kind() {  # $1 = 种类，$2 = 逗号分隔的名字列表
     printf 'ok    %-10s %2d 个组件全部存在\n' "$kind" "$count"
 }
 
-echo "校验白名单组件名（源码: $SRC）"
+echo "校验白名单组件名（源码: ${SRC}）"
 rc=0
 check_kind protocols "$FFMPEG_MIN_PROTOCOLS" || rc=1
 check_kind demuxers  "$FFMPEG_MIN_DEMUXERS"  || rc=1

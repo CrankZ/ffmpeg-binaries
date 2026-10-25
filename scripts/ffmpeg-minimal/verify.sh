@@ -88,7 +88,7 @@ for flag in --disable-gpl --disable-nonfree --disable-version3; do
     fi
 done
 
-for flag in --disable-swscale --disable-avdevice --disable-postproc; do
+for flag in --disable-swscale --disable-avdevice; do
     if printf '%s' "$CONFIG_LINE" | grep -q -- "$flag"; then
         ok "已关闭 $flag"
     else

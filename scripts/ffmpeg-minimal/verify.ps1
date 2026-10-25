@@ -134,6 +134,7 @@ try {
         Info $first
         $cfg = (Get-Content -LiteralPath $verOut | Where-Object { $_ -like 'configuration:*' } | Select-Object -First 1)
         foreach ($flag in @('--disable-everything', '--disable-gpl', '--disable-nonfree', '--disable-version3', '--disable-swscale', '--disable-avdevice')) {
+            # 注：libpostproc 自 FFmpeg 8.0 起已移除，不再有 --disable-postproc
             if ($cfg -and $cfg.Contains($flag)) { Ok "配置含 $flag" } else { Bad "配置缺少 $flag" }
         }
         if ($cfg -and $cfg.Contains('--enable-small')) { Bad '含 --enable-small' } else { Ok '未使用 --enable-small' }

@@ -37,8 +37,11 @@ FFMPEG_MIN_PARSERS="aac,aac_latm,mpegaudio,opus,vorbis,flac,ac3,dca,cook,mlp"
 FFMPEG_MIN_FILTERS="aresample,anull,format,aformat,atrim"
 
 # --- 库 ----------------------------------------------------------------------
+# 注：libpostproc 自 FFmpeg 8.0 起已从源码树移除，没有 --disable-postproc 这个
+#     configure 选项了（9.0.2 上写了会直接报 Unknown option），因此这里只列
+#     avdevice / swscale；postproc 已经不存在，效果等价于"关闭"。
 FFMPEG_MIN_LIBS_ENABLE="avcodec,avformat,avfilter,swresample"
-FFMPEG_MIN_LIBS_DISABLE="avdevice,postproc,swscale"
+FFMPEG_MIN_LIBS_DISABLE="avdevice,swscale"
 
 # --- 许可证 --------------------------------------------------------------
 # LGPL-2.1-or-later：禁止 GPL / 非自由 / (L)GPLv3 组件
