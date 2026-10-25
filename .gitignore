@@ -1,4 +1,5 @@
 work/
+verify-dl/
 .tmp/
 *.log
 .idea/
