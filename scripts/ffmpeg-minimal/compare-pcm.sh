@@ -48,15 +48,33 @@ file_size() {
 sha256_of_pcm() {  # 跳过 1024 字节头部，只对 PCM 数据取 sha256
     tail -c +1025 "$1" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | awk '{print $1}'
 }
-time_best() {   # $1 = repeats，其余 = 命令；打印最优耗时（秒）
-    local n="$1" best="" t
+# 交替测量 minimal / reference，避免"先测的那个吃亏"（CPU 降频、缓存冷热）
+time_both() {   # $1 = repeats, 其余 = 交给两个二进制共同的参数；结果写入 T_MIN / T_REF
+    local n="$1" x
     shift
+    T_MIN=999; T_REF=999
     TIMEFORMAT=%R
     for _ in $(seq 1 "$n"); do
-        t=$( { time "$@" >/dev/null 2>&1; } 2>&1 )
-        best=$(awk -v a="$t" -v b="${best:-999}" 'BEGIN { print (a+0 < b+0) ? a+0 : b+0 }')
+        x=$( { time "$MINIMAL" "$@" >/dev/null 2>&1; } 2>&1 )
+        T_MIN=$(awk -v a="$x" -v b="$T_MIN" 'BEGIN { print (a+0 < b+0) ? a+0 : b+0 }')
+        x=$( { time "$REFERENCE" "$@" >/dev/null 2>&1; } 2>&1 )
+        T_REF=$(awk -v a="$x" -v b="$T_REF" 'BEGIN { print (a+0 < b+0) ? a+0 : b+0 }')
     done
-    printf '%s' "$best"
+}
+
+# PCM 差异定位：首个不同字节偏移 + 不同字节数（只在 sha 不相等时调用）
+pcm_diff() {
+    local a="$1" b="$2" total changed first
+    total="$(file_size "$a")"
+    if command -v cmp >/dev/null 2>&1; then
+        cmp -l "$a" "$b" 2>/dev/null > "$TMP/cmp.txt" || true
+        changed="$(wc -l < "$TMP/cmp.txt" | tr -d ' ')"
+        first="$(head -n 1 "$TMP/cmp.txt" 2>/dev/null | awk '{print $1}')"
+        printf 'PCM 长度 %s / %s，首个差异字节 @%s，差异字节数 %s\n' \
+            "$total" "$(file_size "$b")" "${first:-?}" "${changed:-0}"
+    else
+        printf 'PCM 长度 %s / %s（无 cmp，无法定位差异）\n' "$total" "$(file_size "$b")"
+    fi
 }
 
 PASS=0
@@ -105,6 +123,7 @@ for f in "$FIXTURES"/tone*; do
     fi
 
     printf '  %-18s %12s %12s %18s %10s\n' "$name" "$smin" "$sref" "$(printf '%s' "$hmin" | cut -c1-16)" "$verdict"
+    [ "$same" = "YES" ] || printf '                     %s\n' "$(pcm_diff "$o_min" "$o_ref")"
 
     # 性能对比只对代表性格式做，且用 -stream_loop 放大工作量 + -f null 去掉 I/O 噪声，
     # 否则 5 秒样本的解码时间几乎全被进程启动开销淹没，测出来没有意义。
@@ -113,10 +132,9 @@ for f in "$FIXTURES"/tone*; do
         *) continue ;;
     esac
 
-    t_min="$(time_best "$REPEATS" "$MINIMAL" -hide_banner -loglevel error \
-        -stream_loop "$PERF_LOOP" -i "$f" -vn -ac 1 -ar 16000 -f null -)"
-    t_ref="$(time_best "$REPEATS" "$REFERENCE" -hide_banner -loglevel error \
-        -stream_loop "$PERF_LOOP" -i "$f" -vn -ac 1 -ar 16000 -f null -)"
+    time_both "$REPEATS" -hide_banner -loglevel error -stream_loop "$PERF_LOOP" \
+        -i "$f" -vn -ac 1 -ar 16000 -f null -
+    t_min="$T_MIN"; t_ref="$T_REF"
     delta="$(awk -v a="$t_min" -v b="$t_ref" 'BEGIN { if (b+0 <= 0) print "n/a"; else printf "%.1f", (a-b)*100.0/b }')"
 
     if [ "$delta" = "n/a" ]; then

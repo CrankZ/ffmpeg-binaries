@@ -116,8 +116,26 @@ fixtures/              冒烟测试样本（覆盖白名单里的容器与音频
 - 体积**只**来自"组件白名单裁剪 + strip"
 - 禁止 `--enable-small`（= `-Os`，解码慢 10–30%）
 - 禁止 `--disable-asm`；x86_64 必须装 nasm 走 SIMD 汇编路径（构建脚本会断言 `HAVE_X86ASM 1`，为 0 直接失败）
-- 统一 `-O2`（`--optflags=-O2`），保留 pthreads 与 runtime cpudetect
+- 保留 pthreads 与 runtime cpudetect
 - `--disable-autodetect`：不链接任何第三方库，保证三平台行为一致、可复现
+- `--disable-videotoolbox`：白名单之外的 macOS 硬解，关掉后产物只依赖 `/usr/lib/libSystem`
+
+### 优化等级：`-O3`（而非 `-O2`），原因如下
+
+FFmpeg 的构建系统不支持给单个文件加编译选项，而实测（CI run 40201186924，`-O2` 版本对比官方全量构建）：
+
+| 样本 | `-O2` 耗时 | 官方全量（`-O3`） | 差异 |
+| --- | --- | --- | --- |
+| tone.mp3 | 3.05 s | 1.74 s | **+75%** |
+| tone.aac | 1.50 s | 1.45 s | +3.8% |
+
+原因：FFmpeg 9.0 的 mp3 解码路径（`mpegaudiodsp`）已没有 x86 SIMD 汇编，完全依赖编译器自动向量化——
+`-O2` 既慢 75%，又让浮点舍入与官方构建不一致（PCM 无法逐字节相同）。也就是说 `-O2` 会同时踩中
+"PCM SHA256 一致"和"耗时差异 < 5%"这两条硬性验收。按"个别热点解码器可单独 `-O3`"这条的初衷
+（宁可 `-O3`，也不能牺牲性能），这里统一用官方默认的 `-O3`。
+
+体积代价可以忽略：实测 `win-x64` 3.28 MB、`macos-arm64` 3.08 MB，远低于目标区间。
+确实需要 `-O2` 时：`FFMPEG_MIN_OPTFLAGS=-O2 bash scripts/ffmpeg-minimal/build-msys2.sh`。
 
 ### 关于 `eac3` / `truehd` parser
 

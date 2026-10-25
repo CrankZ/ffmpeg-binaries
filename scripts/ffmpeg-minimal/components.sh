@@ -101,13 +101,29 @@ ffmpeg_min_common_args() {
         # —— 性能：线程与运行时 CPU 检测都保留（禁止 --enable-small / --disable-asm）——
         --enable-pthreads
         --enable-runtime-cpudetect
-        --optflags=-O2
+        --optflags="$FFMPEG_MIN_OPTFLAGS"
         # —— 许可证 ——
         --disable-gpl
         --disable-nonfree
         --disable-version3
     )
 }
+
+# -----------------------------------------------------------------------------
+# 优化等级
+#
+# 1.md 写的是"统一用 -O2、个别热点解码器可单独 -O3"。但实测（CI run 40201186924）：
+# FFmpeg 9.0 的 mp3 解码路径（mpegaudiodsp）已经没有 x86 SIMD 汇编，全靠编译器自动
+# 向量化，-O2 相对官方全量构建默认的 -O3：
+#   * 解码耗时慢 75%（1500s 音频：3.05s vs 1.74s）
+#   * PCM 与官方构建不是逐字节一致（浮点向量化改变舍入顺序）
+# 也就是说 -O2 会同时踩中 1.md 的两条硬性验收（PCM SHA256 一致、耗时差异 < 5%）。
+# 由于 FFmpeg 的构建系统不支持给单个文件加编译选项，这里按该条的初衷
+#（宁可 -O3 也不要 -Os / 不要牺牲性能）统一使用官方默认的 -O3。
+# 体积不是问题：实测 3.3MB(win-x64) / 3.08MB(macos-arm64)，远低于目标区间。
+# 需要严格 -O2 时：FFMPEG_MIN_OPTFLAGS=-O2 bash scripts/ffmpeg-minimal/build-msys2.sh
+# -----------------------------------------------------------------------------
+FFMPEG_MIN_OPTFLAGS="${FFMPEG_MIN_OPTFLAGS:--O3}"
 
 # 冒烟测试里用来确认"跑的是我们这份裁剪构建"的版本后缀
 FFMPEG_MIN_EXTRA_VERSION="-minimal"
