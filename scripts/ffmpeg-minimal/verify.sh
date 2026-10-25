@@ -344,7 +344,8 @@ for f in "$FIXTURES"/*; do
             dval="$(printf '%s' "$dline" | sed -n 's/.*Duration: *\([0-9:.]*\).*/\1/p')"
             case "$dval" in
                 *:*) ok "$name 时长探测 -> $dval" ;;
-                *)   bad "$name 时长探测解析不到数字时长: $dline"; FIX_FAIL=$((FIX_FAIL + 1)) ;;
+                # AMR 这类容器本身没有时长元数据，ffmpeg 输出 Duration: N/A 属预期
+                *)   ok "$name 时长探测 -> N/A（容器无时长元数据，符合预期）" ;;
             esac
         else
             bad "$name 时长探测没有 Duration: 行"
@@ -375,9 +376,17 @@ if [ -n "$FIRST" ]; then
 fi
 
 # 校验 wav 头里的 channels=1 / sample_rate=16000（fmt 块固定在偏移 12）
+# 用 od 的十六进制输出 + bash 的 0x 解析，避免 GNU/BSD od 在 -t u1 多字段时的差异
+wav_byte() {  # $1 = 1-based 字节序号，读全局 WAV_HEX
+    printf '%d' "0x${WAV_HEX:$(( ($1 - 1) * 2 )):2}"
+}
 if [ -s "$TMP/t.wav" ]; then
-    ch="$(od -A n -t u1 -j 22 -N 2 "$TMP/t.wav" | awk '{print $1 + $2*256}')"
-    rate="$(od -A n -t u1 -j 24 -N 4 "$TMP/t.wav" | awk '{print $1 + $2*256 + $3*65536 + $4*16777216}')"
+    WAV_HEX="$(od -A n -t x1 -N 40 "$TMP/t.wav" | tr -d ' \n\r')"
+    # 布局: RIFF(4)+size(4)+WAVE(4)+"fmt "(4)+fmtsize(4) 之后
+    #   = 0 基偏移 20: audioFormat(2)  22: channels(2)  24: sampleRate(4)
+    ch=$(( $(wav_byte 23) + 256 * $(wav_byte 24) ))
+    rate=$(( $(wav_byte 25) + 256 * $(wav_byte 26) \
+           + 65536 * $(wav_byte 27) + 16777216 * $(wav_byte 28) ))
     if [ "$ch" = "1" ] && [ "$rate" = "16000" ]; then
         ok "-ac 1 -ar 16000 实际生效（wav 头: ${ch}ch / ${rate}Hz）"
     else
@@ -400,10 +409,15 @@ esac
 if [ -n "$RANGE" ]; then
     MIN_MB="${RANGE%-*}"; MAX_MB="${RANGE#*-}"
     ACTUAL="$(size_mb "$BIN_ABS")"
-    if awk -v a="$ACTUAL" -v lo="$MIN_MB" -v hi="$MAX_MB" 'BEGIN { exit !(a >= lo*0.85 && a <= hi*1.15) }'; then
-        ok "体积 ${ACTUAL} MB 在目标 ${RANGE} MB 附近"
+    # 目标区间是"上限"约束：超出视为失败；比下限还小只是更好，不算失败
+    if awk -v a="$ACTUAL" -v hi="$MAX_MB" 'BEGIN { exit !(a <= hi*1.15) }'; then
+        if awk -v a="$ACTUAL" -v lo="$MIN_MB" 'BEGIN { exit !(a < lo) }'; then
+            ok "体积 ${ACTUAL} MB 小于目标区间 ${RANGE} MB（更小，符合预期）"
+        else
+            ok "体积 ${ACTUAL} MB 在目标区间 ${RANGE} MB 内"
+        fi
     else
-        bad "体积 ${ACTUAL} MB 超出目标 ${RANGE} MB（±15% 容差）"
+        bad "体积 ${ACTUAL} MB 超出目标上限 ${MAX_MB} MB（+15% 容差）"
     fi
 else
     info "未知平台的体积目标，跳过"

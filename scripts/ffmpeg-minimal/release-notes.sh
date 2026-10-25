@@ -39,7 +39,7 @@ mb() { awk -v b="${1:-0}" 'BEGIN { printf "%.2f", b/1048576 }'; }
         bytes="$(bin_size_bytes "$DIST/$zip" "$bin")"
         lo="${range%-*}"; hi="${range#*-}"
         verdict="$(awk -v a="$(mb "$bytes")" -v lo="$lo" -v hi="$hi" \
-            'BEGIN { if (a >= lo*0.85 && a <= hi*1.15) print "✓ 达标"; else print "✗ 超出" }')"
+            'BEGIN { if (a > hi*1.15) print "✗ 超出上限"; else if (a < lo) print "✓ 达标（比目标更小）"; else print "✓ 达标" }')"
         echo "| \`$zip\` | $label | $(mb "$bytes") MB | $range MB | $verdict |"
     done
     echo
