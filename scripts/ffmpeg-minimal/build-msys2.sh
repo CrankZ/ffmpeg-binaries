@@ -64,6 +64,7 @@ if [ "${BUILD_REFERENCE:-false}" = "true" ]; then
         --target-os=mingw32 \
         --enable-pthreads \
         --disable-w32threads \
+        --x86asmexe=nasm \
         --extra-ldflags="-static"
 fi
 

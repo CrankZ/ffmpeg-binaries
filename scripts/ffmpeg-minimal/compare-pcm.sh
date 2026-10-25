@@ -19,11 +19,11 @@ MINIMAL=""
 REFERENCE=""
 FIXTURES="$HERE/../../fixtures"
 TOLERANCE="5"
-REPEATS="3"
+REPEATS="5"
 # 性能对比只跑这几个代表性格式（PCM 一致性对全部 fixture 都跑）
 PERF_FIXTURES="${PERF_FIXTURES:-tone.mp3,tone.aac,tone_alac.m4a,tone.mkv}"
 # 用 -stream_loop 把工作量放大到秒级，抵消进程启动开销的影响
-PERF_LOOP="${PERF_LOOP:-300}"
+PERF_LOOP="${PERF_LOOP:-500}"
 
 while [ $# -gt 0 ]; do
     case "$1" in

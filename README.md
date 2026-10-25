@@ -137,6 +137,12 @@ FFmpeg 的构建系统不支持给单个文件加编译选项，而实测（CI r
 体积代价可以忽略：实测 `win-x64` 3.28 MB、`macos-arm64` 3.08 MB，远低于目标区间。
 确实需要 `-O2` 时：`FFMPEG_MIN_OPTFLAGS=-O2 bash scripts/ffmpeg-minimal/build-msys2.sh`。
 
+### 关于 `mp3float` 解码器
+
+任务白名单只写了 `mp3`，但全量构建会优先选用浮点解码器 `mp3float`。只启用定点 `mp3` 时，
+与同版本全量构建的 PCM 与解码耗时都无法对齐（CI 会在 `tone.mp3` / `tone.avi` 上失败）。
+因此在 `components.sh` 中额外启用 `mp3float`（体积增加可忽略）。
+
 ### 关于 `eac3` / `truehd` parser
 
 任务说明的白名单里列了 `eac3`、`truehd` 两个 parser，但 **FFmpeg 9.0 起已没有独立的这两个 parser**

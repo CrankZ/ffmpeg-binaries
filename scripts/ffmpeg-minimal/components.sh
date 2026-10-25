@@ -24,7 +24,8 @@ FFMPEG_MIN_MUXERS="wav,null"
 FFMPEG_MIN_ENCODERS="pcm_s16le"
 
 # --- 音频 decoder ------------------------------------------------------------
-FFMPEG_MIN_DECODERS="aac,aac_latm,mp3,mp2,ac3,eac3,dca,truehd,mlp,opus,vorbis,flac,alac,wavpack,tta,ape,cook,sipr,atrac3,atrac3p,wmav1,wmav2,wmapro,wmalossless,adpcm_ms,adpcm_ima_wav,gsm,amrnb,amrwb,pcm_s16le,pcm_s16be,pcm_u8,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,pcm_f32le,pcm_f64le,pcm_alaw,pcm_mulaw"
+# mp3float：全量构建默认优先走浮点 MP3 解码；只开 mp3（定点）会与参考构建 PCM/性能不一致
+FFMPEG_MIN_DECODERS="aac,aac_latm,mp3,mp3float,mp2,ac3,eac3,dca,truehd,mlp,opus,vorbis,flac,alac,wavpack,tta,ape,cook,sipr,atrac3,atrac3p,wmav1,wmav2,wmapro,wmalossless,adpcm_ms,adpcm_ima_wav,gsm,amrnb,amrwb,pcm_s16le,pcm_s16be,pcm_u8,pcm_s24le,pcm_s24be,pcm_s32le,pcm_s32be,pcm_f32le,pcm_f64le,pcm_alaw,pcm_mulaw"
 
 # --- parser ------------------------------------------------------------------
 # 注意：FFmpeg 9.0 起不再有独立的 eac3 / truehd parser
