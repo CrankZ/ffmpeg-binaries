@@ -137,7 +137,9 @@ win-*)
     fi
     ;;
 macos-*)
-    LIBS="$(otool -L "$BIN_ABS" | tail -n +2 | awk '{print $1}' | sort -u)"
+    # fat 二进制（universal）的 otool -L 会多出 "path (architecture arm64):" 这类表头行，
+    # 只保留真正的库路径（以 / 或 @ 开头、且不是以 : 结尾的表头）
+    LIBS="$(otool -L "$BIN_ABS" | awk '!/:$/ && ($1 ~ /^\// || $1 ~ /^@/) {print $1}' | sort -u)"
     info "链接库: $(printf '%s' "$LIBS" | tr '\n' ' ')"
     UNEXPECTED=""
     for l in $LIBS; do

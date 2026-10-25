@@ -92,6 +92,9 @@ ffmpeg_min_common_args() {
         # —— 不要网络 / 流媒体协议，也不要自动探测第三方库 ——
         --disable-network
         --disable-autodetect
+        # —— 白名单之外的平台专有组件：macOS 的 VideoToolbox 硬解（不需要，
+        #    关掉后 macOS 产物只依赖 /usr/lib/libSystem，不再链 CoreMedia/CoreVideo）——
+        --disable-videotoolbox
         # —— 静态链接 ——
         --enable-static
         --disable-shared
