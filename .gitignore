@@ -1,0 +1,4 @@
+work/
+.tmp/
+*.log
+.idea/

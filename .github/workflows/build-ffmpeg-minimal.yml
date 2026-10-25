@@ -1,0 +1,189 @@
+name: build-ffmpeg-minimal
+
+# 手动触发：输入 FFmpeg 版本与产物 tag，产出 win-x64 / macos-arm64 / macos-x64 /
+# macos-universal 四个最小化静态可执行文件，并发布为 GitHub Release。
+on:
+  workflow_dispatch:
+    inputs:
+      ffmpeg_version:
+        description: "FFmpeg 版本（如 9.0.2）"
+        required: true
+        default: "9.0.2"
+      release_tag:
+        description: "产物 tag（Release 名）"
+        required: true
+        default: "ffmpeg-min-9.0.2"
+      build_reference:
+        description: "额外构建同版本全量版本做 PCM 一致性 / 解码耗时对比"
+        type: boolean
+        default: true
+      publish_release:
+        description: "发布 GitHub Release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ffmpeg-min-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+env:
+  FFMPEG_VERSION: ${{ inputs.ffmpeg_version }}
+  # 与 muyi 的 .cargo/config.toml（macOS 13.0）保持一致
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+jobs:
+  # ===========================================================================
+  windows:
+    name: Windows x64 (MSYS2 MINGW64)
+    runs-on: windows-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 缓存 FFmpeg 源码（key 含版本号）
+        uses: actions/cache@v4
+        with:
+          path: work/dl
+          key: ffmpeg-src-${{ inputs.ffmpeg_version }}
+
+      - name: 准备 MSYS2 (MINGW64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            base-devel
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-nasm
+            make
+            pkgconf
+            diffutils
+            zip
+
+      - name: 构建 minimal（configure + make + strip + 打包）
+        shell: msys2 {0}
+        env:
+          BUILD_REFERENCE: ${{ inputs.build_reference }}
+        run: bash scripts/ffmpeg-minimal/build-msys2.sh
+
+      - name: 验收（-version / DLL 依赖 / 组件面 / 三种调用 / 体积）
+        shell: msys2 {0}
+        run: |
+          bash scripts/ffmpeg-minimal/verify.sh \
+            --binary work/build/win-x64/ffmpeg.exe \
+            --platform win-x64
+
+      - name: 与同版本全量构建对比 PCM 与解码耗时
+        if: inputs.build_reference
+        shell: msys2 {0}
+        run: |
+          bash scripts/ffmpeg-minimal/compare-pcm.sh \
+            --minimal   work/build/win-x64/ffmpeg.exe \
+            --reference work/build/ref-win-x64/ffmpeg.exe
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-binaries
+          path: work/dist/*.zip
+          if-no-files-found: error
+
+  # ===========================================================================
+  # 用 macos-14 (Apple Silicon) 一个 runner 同时编 arm64 与 x86_64，再 lipo 合并：
+  #   * Intel runner（macos-13 / macos-15-intel）在公共仓库上排期更慢、且 Intel 镜像
+  #     在逐步退役；arm64 上 clang 交叉编 x86_64 是官方支持路径
+  #   * 关键前提：x86_64 切片必须有 nasm，否则汇编路径被关闭、性能大幅下降（脚本内断言）
+  #   * 两个架构各自 out-of-tree 构建 —— 一次 configure 不可能直接产出 universal
+  macos:
+    name: macOS arm64 + x86_64 + universal
+    runs-on: macos-14
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 缓存 FFmpeg 源码（key 含版本号）
+        uses: actions/cache@v4
+        with:
+          path: work/dl
+          key: ffmpeg-src-${{ inputs.ffmpeg_version }}
+
+      - name: 安装 nasm（x86_64 SIMD 汇编必需）
+        run: brew install nasm || brew link --overwrite nasm
+
+      - name: 构建 arm64 / x86_64 / universal
+        env:
+          BUILD_REFERENCE: ${{ inputs.build_reference }}
+        run: bash scripts/ffmpeg-minimal/build-macos.sh
+
+      - name: 安装 Rosetta（在 arm64 runner 上跑 x86_64 切片冒烟）
+        run: sudo softwareupdate --install-rosetta --agree-to-license || true
+
+      - name: 验收 macos-arm64
+        run: |
+          bash scripts/ffmpeg-minimal/verify.sh \
+            --binary work/build/macos-arm64/ffmpeg \
+            --platform macos-arm64 --archs arm64
+
+      - name: 验收 macos-x64（Rosetta 运行）
+        run: |
+          arch -x86_64 bash scripts/ffmpeg-minimal/verify.sh \
+            --binary work/build/macos-x86_64/ffmpeg \
+            --platform macos-x64 --archs x86_64
+
+      - name: 验收 macos-universal
+        run: |
+          bash scripts/ffmpeg-minimal/verify.sh \
+            --binary work/build/macos-universal/ffmpeg \
+            --platform macos-universal --archs arm64,x86_64
+
+      - name: 与同版本全量构建对比 PCM 与解码耗时
+        if: inputs.build_reference
+        run: |
+          bash scripts/ffmpeg-minimal/compare-pcm.sh \
+            --minimal   work/build/macos-arm64/ffmpeg \
+            --reference work/build/ref-macos-arm64/ffmpeg
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-binaries
+          path: work/dist/*.zip
+          if-no-files-found: error
+
+  # ===========================================================================
+  release:
+    name: 发布 Release
+    needs: [windows, macos]
+    if: inputs.publish_release && needs.windows.result == 'success' && needs.macos.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 收集产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 生成 SHA256SUMS 与 Release 说明
+        run: |
+          bash scripts/ffmpeg-minimal/release-notes.sh dist "${{ inputs.release_tag }}"
+          cat dist/SHA256SUMS.txt
+
+      - name: 创建/更新 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file dist/RELEASE_NOTES.md
+          else
+            gh release create "$TAG" \
+              --title "FFmpeg minimal build (${{ inputs.ffmpeg_version }})" \
+              --notes-file dist/RELEASE_NOTES.md
+          fi
+          gh release upload "$TAG" dist/*.zip dist/SHA256SUMS.txt --clobber

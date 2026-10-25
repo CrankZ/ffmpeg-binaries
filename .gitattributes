@@ -1,0 +1,13 @@
+* text=auto
+
+# 构建脚本必须是 LF：Windows 上的 CRLF 会让 MSYS2 / macOS 的 bash 直接报错
+*.sh  text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# PowerShell 脚本用 CRLF（Windows PowerShell 5.1 友好）
+*.ps1 text eol=crlf
+
+# 测试样本是二进制
+fixtures/** binary
+*.zip binary
