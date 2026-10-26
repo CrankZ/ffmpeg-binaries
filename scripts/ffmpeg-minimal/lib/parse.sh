@@ -185,6 +185,20 @@ ffmpeg_min_is_number() {
     printf '%s' "$1" | grep -qE '^[0-9]+([.][0-9]+)?$'
 }
 
+# 中位数（参数为任意个数字）；无参数返回 1。结果保留 4 位小数。
+# 用于耗时对比：逐轮取 min/ref 比值的中位数，单个离群轮次不会让验收误判。
+ffmpeg_min_median() {
+    [ "$#" -gt 0 ] || return 1
+    printf '%s\n' "$@" | sort -n | awk '
+        { v[NR] = $1 }
+        END {
+            if (NR == 0) exit 1
+            m = int((NR + 1) / 2)
+            if (NR % 2) printf "%.4f", v[m]
+            else printf "%.4f", (v[m] + v[m+1]) / 2
+        }'
+}
+
 # 从 `ffmpeg -version` 输出解析版本 token（首行形如
 # "ffmpeg version 9.0.2-minimal Copyright (c) ..."）。
 # 成功输出 "9.0.2-minimal"；不是 ffmpeg 的版式或版本为空时返回 1。
