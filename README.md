@@ -56,7 +56,7 @@ gh run watch
 | `ffmpeg_sha256` | 可选；填了就对源码 tar.xz 做强校验（同时禁用 GitHub 归档回退），留空则只记录实际 sha256 到 `BUILD.txt` |
 | `release_tag` | Release 名；4 个 zip + `SHA256SUMS.txt` 会发布到这个 tag |
 | `build_reference` | 是否额外构建一份同版本**全组件参考构建**（关闭 autodetect/网络，仅用于对照）做 PCM 一致性与解码耗时对比 |
-| `publish_release` | 是否发 Release（关掉就只在同一次 run 内用 cache 传递产物，不发布） |
+| `publish_release` | 是否发 Release（关掉就只构建并验收，不发布） |
 
 流水线各构建 job **并行**执行（Windows minimal / Windows 参考 / macOS arm64 / macOS x86_64 /
 macOS 参考），universal 只做 lipo，最后由 release 汇总；同时带三类缓存：
@@ -66,7 +66,7 @@ macOS 参考），universal 只做 lipo，最后由 release 汇总；同时带�
 | `work/dl` | FFmpeg 源码 tar.xz（按版本 + 平台） |
 | `.ccache` | ccache 对象缓存，重跑/换 tag 时大幅减少 make 时间 |
 | `work/build/ref-*` | 参考构建二进制，命中且版本一致时**整段跳过全量编译** |
-| `xfer-*` | 本次 run 内各 job 之间传递产物（不受 artifact 配额限制，也省一次压缩上传） |
+| `xfer-*` | 同一次 run 内**同一 OS** 的 job 之间传递二进制（compare / universal 用）；zip 走 artifact 传给 release |
 
 所有构建 job 只读仓库（`permissions: contents: read`），只有 release job 有 `contents: write`。
 
@@ -76,7 +76,7 @@ macOS 参考），universal 只做 lipo，最后由 release 汇总；同时带�
 # 从 Release（推荐，带 sha256）
 gh release download ffmpeg-min-9.0.2 --pattern '*.zip' --dir ./dl
 
-# 中间产物只在同一次 run 的 job 之间用 cache 传递，不保留 artifact；
+# 各平台 zip 由构建 job 以 artifact 上传，release job 统一下载后发布到 Release；
 # 需要单独某个平台的文件时，直接解压 Release 里的对应 zip。
 ```
 
