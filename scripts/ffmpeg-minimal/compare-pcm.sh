@@ -16,6 +16,8 @@ set -uo pipefail
 export LC_NUMERIC=C
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=/dev/null
+. "$HERE/lib/parse.sh"
 
 MINIMAL=""
 REFERENCE=""
@@ -44,41 +46,13 @@ done
 [ -f "$REFERENCE" ] || { echo "ERROR: --reference 不存在: $REFERENCE" >&2; exit 2; }
 [ -d "$FIXTURES" ]  || { echo "ERROR: fixtures 目录不存在" >&2; exit 2; }
 
-file_size() {
-    if [ "$(uname -s)" = "Darwin" ]; then stat -f %z "$1"; else stat -c %s "$1"; fi
-}
-
-# 解析 RIFF/WAVE 的 data chunk，返回 PCM 数据起始的 0-based 偏移。
-# 以前固定跳过 1024 字节：wav 头实际只有 44~68 字节，会漏掉前约 0.5 秒 PCM。
-pcm_data_offset() {
-    local hex prefix
-    hex="$(od -A n -t x1 -N 4096 "$1" 2>/dev/null | tr -d ' \n\r')"
-    case "$hex" in
-        52494646*) ;;      # "RIFF"
-        *) echo 0; return ;;
-    esac
-    case "$hex" in
-        *57415645*) ;;     # "WAVE"
-        *) echo 0; return ;;
-    esac
-    prefix="${hex%%64617461*}"    # 第一个 "data"（hex 64617461）
-    [ "$prefix" != "$hex" ] || { echo 0; return; }
-    echo $(( ${#prefix} / 2 + 8 ))
-}
-
-pcm_size() {  # PCM 数据字节数（不含 wav 头）
-    local off
-    off="$(pcm_data_offset "$1")"
-    echo $(( $(file_size "$1") - off ))
-}
-
+# wav/pcm 的解析逻辑统一放在 lib/parse.sh：verify.sh 和离线单测用的是同一份实现，
+# 避免"测试通过但真实脚本里另一份实现有 bug"。
 sha256_of_pcm() {  # 只对 PCM 数据取 sha256
     local off
-    off="$(pcm_data_offset "$1")"
+    off="$(ffmpeg_min_pcm_data_offset "$1")" || return 1
     tail -c +$((off + 1)) "$1" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | awk '{print $1}'
 }
-
-is_number() { printf '%s' "$1" | grep -qE '^[0-9]+([.][0-9]+)?$'; }
 
 # 交替测量 minimal / reference，避免"先测的那个吃亏"（CPU 降频、缓存冷热）
 time_both() {   # $1 = repeats, 其余 = 交给两个二进制共同的参数；结果写入 T_MIN / T_REF
@@ -88,14 +62,14 @@ time_both() {   # $1 = repeats, 其余 = 交给两个二进制共同的参数；
     TIMEFORMAT=%R
     for _ in $(seq 1 "$n"); do
         x=$( { time "$MINIMAL" "$@" >/dev/null 2>&1; } 2>&1 )
-        is_number "$x" || return 1
+        ffmpeg_min_is_number "$x" || return 1
         if [ -z "$T_MIN" ]; then
             T_MIN="$x"
         else
             T_MIN="$(awk -v a="$x" -v b="$T_MIN" 'BEGIN { print (a+0 < b+0) ? a+0 : b+0 }')"
         fi
         x=$( { time "$REFERENCE" "$@" >/dev/null 2>&1; } 2>&1 )
-        is_number "$x" || return 1
+        ffmpeg_min_is_number "$x" || return 1
         if [ -z "$T_REF" ]; then
             T_REF="$x"
         else
@@ -108,16 +82,16 @@ time_both() {   # $1 = repeats, 其余 = 交给两个二进制共同的参数；
 # PCM 差异定位：首个不同字节偏移 + 不同字节数（只在 sha 不相等时调用）
 pcm_diff() {
     local a="$1" b="$2" oa ob total changed first
-    oa="$(pcm_data_offset "$a")"; ob="$(pcm_data_offset "$b")"
-    total="$(pcm_size "$a")"
+    oa="$(ffmpeg_min_pcm_data_offset "$a")"; ob="$(ffmpeg_min_pcm_data_offset "$b")"
+    total="$(ffmpeg_min_pcm_bytes "$a")"
     if command -v cmp >/dev/null 2>&1; then
         cmp -l <(tail -c +$((oa + 1)) "$a") <(tail -c +$((ob + 1)) "$b") 2>/dev/null > "$TMP/cmp.txt" || true
         changed="$(wc -l < "$TMP/cmp.txt" | tr -d ' ')"
         first="$(head -n 1 "$TMP/cmp.txt" 2>/dev/null | awk '{print $1}')"
         printf 'PCM 长度 %s / %s，首个差异字节 @%s，差异字节数 %s\n' \
-            "$total" "$(pcm_size "$b")" "${first:-?}" "${changed:-0}"
+            "$total" "$(ffmpeg_min_pcm_bytes "$b")" "${first:-?}" "${changed:-0}"
     else
-        printf 'PCM 长度 %s / %s（无 cmp，无法定位差异）\n' "$total" "$(pcm_size "$b")"
+        printf 'PCM 长度 %s / %s（无 cmp，无法定位差异）\n' "$total" "$(ffmpeg_min_pcm_bytes "$b")"
     fi
 }
 
@@ -152,10 +126,22 @@ for f in "$FIXTURES"/tone*; do
         continue
     fi
 
-    smin="$(pcm_size "$o_min")"
-    sref="$(pcm_size "$o_ref")"
-    hmin="$(sha256_of_pcm "$o_min")"
-    href="$(sha256_of_pcm "$o_ref")"
+    if ! smin="$(ffmpeg_min_pcm_bytes "$o_min")"; then
+        bad "$name 无法从 minimal 输出的 wav 头解析 PCM 长度"
+        continue
+    fi
+    if ! sref="$(ffmpeg_min_pcm_bytes "$o_ref")"; then
+        bad "$name 无法从 reference 输出的 wav 头解析 PCM 长度"
+        continue
+    fi
+    if ! hmin="$(sha256_of_pcm "$o_min")"; then
+        bad "$name 无法计算 minimal 的 PCM sha256"
+        continue
+    fi
+    if ! href="$(sha256_of_pcm "$o_ref")"; then
+        bad "$name 无法计算 reference 的 PCM sha256"
+        continue
+    fi
 
     same="NO"
     [ "$hmin" = "$href" ] && [ "$smin" = "$sref" ] && same="YES"

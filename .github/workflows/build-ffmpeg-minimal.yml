@@ -80,9 +80,26 @@ jobs:
           echo "输入校验通过: ffmpeg $FFMPEG_VERSION -> $RELEASE_TAG"
 
   # ===========================================================================
+  # 离线单测：只跑 lib/parse.sh 的纯解析逻辑（wav 头、Duration 行、组件名），
+  # 不构建、不联网，几秒完成。放在所有构建之前，解析逻辑坏了就不用浪费 runner。
+  test-scripts:
+    name: 脚本单测（解析逻辑）
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: 运行单测
+        shell: bash
+        run: bash scripts/ffmpeg-minimal/tests/run-tests.sh
+
+  # ===========================================================================
   win-minimal:
     name: Windows x64 minimal (MSYS2 MINGW64)
-    needs: validate
+    needs: [validate, test-scripts]
     runs-on: windows-2025
     timeout-minutes: 120
     steps:
@@ -154,7 +171,7 @@ jobs:
   # 全量参考构建单独占一个 runner，和 minimal 并行；产物按版本缓存，重跑可直接复用。
   win-reference:
     name: Windows x64 reference（全量对照，不发布）
-    needs: validate
+    needs: [validate, test-scripts]
     if: inputs.build_reference == true
     runs-on: windows-2025
     timeout-minutes: 180
@@ -257,7 +274,7 @@ jobs:
   # 否则汇编路径被关闭、性能大幅下降（脚本内断言）。
   macos-arm64:
     name: macOS arm64 minimal
-    needs: validate
+    needs: [validate, test-scripts]
     runs-on: macos-15
     timeout-minutes: 100
     steps:
@@ -315,7 +332,7 @@ jobs:
 
   macos-x64:
     name: macOS x86_64 minimal（Rosetta 验证）
-    needs: validate
+    needs: [validate, test-scripts]
     runs-on: macos-15
     timeout-minutes: 100
     steps:
@@ -444,7 +461,7 @@ jobs:
 
   macos-reference:
     name: macOS arm64 reference（全量对照，不发布）
-    needs: validate
+    needs: [validate, test-scripts]
     if: inputs.build_reference == true
     runs-on: macos-15
     timeout-minutes: 180

@@ -14,6 +14,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null
 . "$HERE/components.sh"
+# shellcheck source=/dev/null
+. "$HERE/lib/parse.sh"
 
 BIN=""
 PLATFORM=""
@@ -222,37 +224,15 @@ MUXERS="$("$BIN_ABS" -hide_banner -muxers 2>/dev/null)"
 FILTERS="$("$BIN_ABS" -hide_banner -filters 2>/dev/null)"
 PROTOCOLS="$("$BIN_ABS" -hide_banner -protocols 2>/dev/null)"
 
-# 从 -decoders/-encoders/-demuxers/-muxers/-filters 的输出里抽出"启用的名字"
+# 列表解析 / 组件名映射都在 lib/parse.sh（离线单测覆盖），这里只做断言。
 #   * 第 2 列是名字，可能是 "mov,mp4,m4a" 这种逗号列表
 #   * 图例行（" V..... = Video"）第 2 列是 "="，必须排除
-enabled_names() {
-    printf '%s\n' "$1" | awk '
-        $0 ~ /^[ ]*-+$/            { next }
-        NF >= 2 && $1 ~ /^[A-Z.]{1,6}$/ && $2 != "=" {
-            n = split($2, p, ",")
-            for (i = 1; i <= n; i++) print p[i]
-        }
-        NF == 1 && $0 ~ /^[ ]{2}[a-z0-9]/ { print $1 }   # -protocols 的列格式
-    ' | sort -u
-}
-
-# 少数组件的 configure 名与运行时打印名不同，这里做映射：
-#   * 组件 mpegps  -> demuxer 打印名 "mpeg"
-#   * 组件 atrac3p -> decoder 打印名 "atrac3plus"
-alias_of() {
-    case "$1" in
-        mpegps)    echo "mpeg" ;;
-        atrac3p)   echo "atrac3plus" ;;
-        atrac3pal) echo "atrac3plusal" ;;
-        *)         echo "$1" ;;
-    esac
-}
 
 check_names() {  # $1=列表文本 $2=逗号分隔白名单 $3=说明
     local text="$1" names="$2" what="$3" n real missing="" avail
-    avail="$(enabled_names "$text")"
+    avail="$(ffmpeg_min_enabled_names "$text")"
     for n in ${names//,/ }; do
-        real="$(alias_of "$n")"
+        real="$(ffmpeg_min_runtime_name "$n")"
         printf '%s\n' "$avail" | grep -qxF "$real" || missing="$missing $n"
     done
     if [ -z "$missing" ]; then
@@ -293,30 +273,16 @@ else
     ok "无网络协议"
 fi
 
-# 校验 wav 头里的 mono / 16000（fmt 块从偏移 12 开始；兼容 PCM 与 EXTENSIBLE）
+# 校验 wav 头里的 mono / 16000。fmt 解析（含 fmt 不在固定偏移、LIST 块等）在
+# lib/parse.sh，由 tests/run-tests.sh 离线覆盖；这里只负责把结果转成 PASS/FAIL。
 wav_fmt_check() {  # $1=wav 文件 $2=说明；不通过时直接计入 FAILS
-    local f="$1" label="$2" hex ch rate
-    if [ ! -s "$f" ]; then
-        bad "$label 输出为空"
+    local f="$1" label="$2" fields ch rate
+    if ! fields="$(ffmpeg_min_wav_fmt_fields "$f")"; then
+        bad "$label $fields"
         return 1
     fi
-    hex="$(od -A n -t x1 -N 40 "$f" 2>/dev/null | tr -d ' \n\r')"
-    if [ "${#hex}" -lt 56 ]; then
-        bad "$label 头部不足 28 字节，无法解析 wav fmt"
-        return 1
-    fi
-    if [ "${hex:0:8}" != "52494646" ] || [ "${hex:16:8}" != "57415645" ]; then
-        bad "$label 不是 RIFF/WAVE"
-        return 1
-    fi
-    if [ "${hex:24:8}" != "666d7420" ]; then   # 偏移 12 处是 "fmt "
-        bad "$label 缺少 fmt 块"
-        return 1
-    fi
-    # 0-based: 22=channels(2) 24=sampleRate(4)，小端
-    ch=$(( 0x${hex:44:2} + 256 * 0x${hex:46:2} ))
-    rate=$(( 0x${hex:48:2} + 256 * 0x${hex:50:2} \
-           + 65536 * 0x${hex:52:2} + 16777216 * 0x${hex:54:2} ))
+    ch="${fields%% *}"
+    rate="${fields##* }"
     if [ "$ch" = "1" ] && [ "$rate" = "16000" ]; then
         return 0
     fi
@@ -325,7 +291,7 @@ wav_fmt_check() {  # $1=wav 文件 $2=说明；不通过时直接计入 FAILS
 }
 
 # =============================================================================
-title 5/6 "三种实际调用逐个 fixture 冒烟"
+title 5/6 "实际调用逐个 fixture 冒烟（管道 / 文件 / 时长 / 输入管道 / broken pipe / 截断）"
 # =============================================================================
 TOTAL_FIX=0
 FIX_FAIL=0
@@ -341,16 +307,22 @@ for f in "$FIXTURES"/*; do
         break
     fi
     TOTAL_FIX=$((TOTAL_FIX + 1))
+    pcm1=""   # 每个 fixture 重新计算，避免提取失败时沿用上一个的值
 
     # ---- 1) 管道提取（主力路径）----
     out1="$TMP/$name.pipe.wav"
     if "$BIN_ABS" -hide_banner -loglevel error -i "$f" -vn -ac 1 -ar 16000 \
             -f wav -acodec pcm_s16le - > "$out1" 2>"$TMP/err1.txt"; then
         sz="$(file_size "$out1")"
+        pcm1="$(ffmpeg_min_pcm_bytes "$out1" 2>/dev/null)" || pcm1=""
         # 5s 单声道 16k PCM ≈ 160000 字节；允许 ±35%
         if [ "$sz" -gt 32000 ] && [ "$sz" -lt 216000 ]; then
-            ok "$name 管道提取 -> $sz bytes"
+            ok "$name 管道提取 -> $sz bytes（PCM ${pcm1:-?} bytes）"
             wav_fmt_check "$out1" "$name 管道提取" || true
+            if [ -z "$pcm1" ]; then
+                bad "$name 管道提取的 wav 头无法解析 PCM 长度"
+                FIX_FAIL=$((FIX_FAIL + 1))
+            fi
         else
             bad "$name 管道提取输出大小异常: $sz bytes"
             FIX_FAIL=$((FIX_FAIL + 1))
@@ -378,20 +350,41 @@ for f in "$FIXTURES"/*; do
         FIX_FAIL=$((FIX_FAIL + 1))
     fi
 
-    # ---- 3) 时长探测（stderr 解析 Duration:）----
+    # ---- 3) 时长探测（stderr 解析 Duration:）+ 与解码 PCM 长度交叉校验 ----
     if "$BIN_ABS" -hide_banner -i "$f" -vn -f null - >"$TMP/null.out" 2>"$TMP/err3.txt"; then
-        dline="$(grep -m1 'Duration:' "$TMP/err3.txt" || true)"
-        if [ -n "$dline" ]; then
-            dval="$(printf '%s' "$dline" | sed -n 's/.*Duration: *\([0-9:.]*\).*/\1/p')"
-            case "$dval" in
-                *:*) ok "$name 时长探测 -> $dval" ;;
+        dout="$(ffmpeg_min_parse_duration "$(cat "$TMP/err3.txt")")"
+        drc=$?
+        case "$drc" in
+            0)
+                if [ -z "$pcm1" ]; then
+                    # 提取阶段的 PCM 长度不可用，只保留"能解析出时长"这一条
+                    ok "$name 时长探测 -> ${dout}s（无 PCM 长度可交叉校验）"
+                else
+                    # 单声道 16-bit 16kHz：每秒 32000 字节
+                    decoded="$(awk -v b="$pcm1" 'BEGIN { printf "%.2f", b / 32000 }')"
+                    # 容器声明的时长应当与真正解码出的 PCM 长度吻合；容差 10% 且不小于 1s，
+                    # 覆盖个别容器时间戳精度问题，但能抓住"解析到的是别的数字"这类 bug。
+                    if awk -v a="$dout" -v b="$decoded" 'BEGIN {
+                            d = a - b; if (d < 0) d = -d
+                            lim = b * 0.10; if (lim < 1.0) lim = 1.0
+                            exit !(d <= lim)
+                        }'; then
+                        ok "$name 时长探测 -> ${dout}s（解码 PCM ${decoded}s，一致）"
+                    else
+                        bad "$name 时长探测 ${dout}s 与解码 PCM ${decoded}s 不符"
+                        FIX_FAIL=$((FIX_FAIL + 1))
+                    fi
+                fi
+                ;;
+            1)
                 # AMR 这类容器本身没有时长元数据，ffmpeg 输出 Duration: N/A 属预期
-                *)   ok "$name 时长探测 -> N/A（容器无时长元数据，符合预期）" ;;
-            esac
-        else
-            bad "$name 时长探测没有 Duration: 行"
-            FIX_FAIL=$((FIX_FAIL + 1))
-        fi
+                ok "$name 时长探测 -> N/A（容器无时长元数据，符合预期）"
+                ;;
+            *)
+                bad "$name 时长探测没有可解析的 Duration: 行"
+                FIX_FAIL=$((FIX_FAIL + 1))
+                ;;
+        esac
     else
         bad "$name 时长探测失败: $(head -n 2 "$TMP/err3.txt" | tr '\n' ' ')"
         FIX_FAIL=$((FIX_FAIL + 1))
@@ -418,6 +411,78 @@ if [ -n "$FIRST" ]; then
 fi
 info "共 $TOTAL_FIX 个 fixture，失败 $FIX_FAIL 项"
 FAILS=$((FAILS + FIX_FAIL))
+
+# ---- 5) 输入管道 pipe:0（主程序可能把文件内容直接喂给 ffmpeg）----
+# 用 mp3 而不是 mp4：moov 在文件尾部时无法从管道解封装，那是容器特性不是构建问题。
+PIPE_SRC="$(ls "$FIXTURES"/tone.mp3 2>/dev/null | head -n 1)"
+[ -n "$PIPE_SRC" ] || PIPE_SRC="$(ls "$FIXTURES"/*.wav 2>/dev/null | head -n 1)"
+if [ -n "$PIPE_SRC" ]; then
+    if cat "$PIPE_SRC" | "$BIN_ABS" -hide_banner -loglevel error -i pipe:0 \
+            -vn -ac 1 -ar 16000 -f wav -acodec pcm_s16le - \
+            > "$TMP/pipe_in.wav" 2>"$TMP/pipe_in.err"; then
+        psz="$(file_size "$TMP/pipe_in.wav")"
+        if [ "$psz" -gt 32000 ]; then
+            ok "输入管道 pipe:0 可用（$(basename "$PIPE_SRC") -> $psz bytes）"
+            wav_fmt_check "$TMP/pipe_in.wav" "输入管道" || true
+        else
+            bad "输入管道输出太小: $psz bytes"
+        fi
+    else
+        bad "输入管道 pipe:0 解码失败: $(head -n 2 "$TMP/pipe_in.err" | tr '\n' ' ')"
+    fi
+fi
+
+# ---- 6) 输出管道被消费者提前关闭（broken pipe）：必须退出，不能挂死 ----
+# 真实集成里上游（播放器/上传器）会中途停止读 stdout，ffmpeg 必须报错退出而不是卡住。
+if [ -n "$PIPE_SRC" ] && command -v mkfifo >/dev/null 2>&1; then
+    FIFO="$TMP/out.fifo"
+    if mkfifo "$FIFO" 2>/dev/null; then
+        head -c 1024 < "$FIFO" >/dev/null &
+        reader=$!
+        "$BIN_ABS" -hide_banner -loglevel error -i "$PIPE_SRC" -vn -ac 1 -ar 16000 \
+            -f wav -acodec pcm_s16le - > "$FIFO" 2>"$TMP/broken.err" &
+        writer=$!
+        ( sleep 30; kill -9 "$writer" 2>/dev/null; : > "$TMP/broken.timeout" ) &
+        watchdog=$!
+        wait "$writer"; brc=$?
+        kill "$watchdog" 2>/dev/null
+        wait "$watchdog" 2>/dev/null
+        if [ -e "$TMP/broken.timeout" ]; then
+            kill -9 "$reader" 2>/dev/null
+            bad "输出管道提前关闭后 ffmpeg 30s 内没有退出（疑似挂死）"
+        elif [ "$brc" -ne 0 ]; then
+            ok "输出管道提前关闭时 ffmpeg 以非 0 退出（未挂死）"
+        else
+            bad "输出管道提前关闭但 ffmpeg 仍以 0 退出"
+        fi
+        wait "$reader" 2>/dev/null
+        rm -f "$FIFO"
+    else
+        info "当前环境无法创建 FIFO，跳过 broken pipe 测试"
+    fi
+else
+    info "缺少可用输入样本或 mkfifo，跳过 broken pipe 测试"
+fi
+
+# ---- 7) -t 截断（纯音频路径，避免只覆盖视频容器）----
+AUDIO_SRC="$(ls "$FIXTURES"/tone.mp3 2>/dev/null | head -n 1)"
+[ -n "$AUDIO_SRC" ] || AUDIO_SRC="$(ls "$FIXTURES"/tone.flac 2>/dev/null | head -n 1)"
+if [ -n "$AUDIO_SRC" ]; then
+    a_out="$TMP/t_audio.wav"
+    if "$BIN_ABS" -hide_banner -loglevel error -i "$AUDIO_SRC" -t 2 -vn -ac 1 -ar 16000 \
+            -f wav -acodec pcm_s16le - > "$a_out" 2>/dev/null; then
+        a_sz="$(file_size "$a_out")"
+        # 2s 单声道 16-bit 16kHz = 64000 字节 PCM + 44 字节头
+        if [ "$a_sz" -gt 50000 ] && [ "$a_sz" -lt 80000 ]; then
+            ok "-t 2 对纯音频生效（$(basename "$AUDIO_SRC") -> $a_sz bytes）"
+            wav_fmt_check "$a_out" "-t 2 纯音频输出" || true
+        else
+            bad "-t 2 纯音频截断异常: $a_sz bytes"
+        fi
+    else
+        bad "-t 2 纯音频调用失败"
+    fi
+fi
 
 # =============================================================================
 title 6/6 "体积与目标对比"

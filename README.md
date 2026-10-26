@@ -58,8 +58,9 @@ gh run watch
 | `build_reference` | 是否额外构建一份同版本**全组件参考构建**（关闭 autodetect/网络，仅用于对照）做 PCM 一致性与解码耗时对比 |
 | `publish_release` | 是否发 Release（关掉就只构建并验收，不发布） |
 
-流水线各构建 job **并行**执行（Windows minimal / Windows 参考 / macOS arm64 / macOS x86_64 /
-macOS 参考），universal 只做 lipo，最后由 release 汇总；同时带三类缓存：
+流水线先跑一个几秒的 `test-scripts`（离线单测）作为门禁，之后各构建 job **并行**执行
+（Windows minimal / Windows 参考 / macOS arm64 / macOS x86_64 / macOS 参考），
+universal 只做 lipo，最后由 release 汇总；同时带三类缓存：
 
 | 缓存 | 作用 |
 | --- | --- |
@@ -163,14 +164,30 @@ FFmpeg 的构建系统不支持给单个文件加编译选项，而实测（CI r
 `ac3` + `mlp`，解码器 `eac3` / `truehd` 仍然照常启用。`check-components.sh` 会在每次构建前
 核对全部组件名，换版本时名字对不上会立刻失败而不是静默跳过。
 
+## 单元测试（不构建、不联网）
+
+`scripts/ffmpeg-minimal/lib/parse.sh` 里的纯解析逻辑（RIFF chunk 遍历、PCM 偏移/长度、
+`Duration:` 行、组件名映射）由 `tests/run-tests.sh` 用现场构造的 wav 字节覆盖，
+CI 在任何构建之前先跑这个 job（几秒完成，失败则所有构建直接跳过）：
+
+```bash
+bash scripts/ffmpeg-minimal/tests/run-tests.sh      # 失败项以非 0 退出
+bash scripts/ffmpeg-minimal/tests/run-tests.sh -v   # 同时打印通过的用例
+```
+
+覆盖的边界包括：`data` 块前夹 `LIST`/`INFO`、chunk 长度为奇数时的 1 字节补齐、
+流式/RF64 的 `0xFFFFFFFF` 大小字段、文件被截断、fmt 缺失、`Duration: N/A` 与不可解析值。
+
 ## 验收清单（CI 自动执行，失败即 job 失败）
 
 1. `ffmpeg -version` 正常输出，且配置行含 `--disable-everything`，不含 `--enable-small` / `--disable-asm`
 2. Windows：`objdump -p ffmpeg.exe` 的 `DLL Name` 只有系统 DLL（`api-ms-win-*` 视为系统 API Set）
 3. macOS：`otool -L` 只有系统库；`lipo -archs` 含期望架构；`minos >= 13.0`；已签名
-4. `fixtures/` 里每个样本逐个跑三种调用：PCM 非空、`-ac 1 -ar 16000` 真实生效（每个输出都解析 wav 头）、`Duration:` 可解析
-5. 与同版本**全组件参考构建**对同一文件输出 PCM 做 SHA256 对比，并比较解码耗时（差异需 < 5%，取多次最优）
-6. 产物体积与目标区间对比，写进 Release 说明
+4. `fixtures/` 里每个样本逐个跑：输出管道、预转 WAV 文件、`Duration:` 探测；PCM 非空、
+   `-ac 1 -ar 16000` 真实生效（解析 wav 头）、`Duration:` 数值与解码出的 PCM 长度吻合
+5. 额外冒烟：`-i pipe:0` 输入管道、消费者提前关闭输出管道时不挂死、`-t 2` 截断（视频容器 + 纯音频）
+6. 与同版本**全组件参考构建**对同一文件输出 PCM 做 SHA256 对比，并比较解码耗时（差异需 < 5%，取多次最优）
+7. 产物体积与目标区间对比，写进 Release 说明
 
 > 对比 PCM 时统一输出 `-f wav`，解析 RIFF 的 `data` chunk 后只比裸 PCM —— 因为最小化构建的
 > muxer 白名单里只有 `wav` / `null`，故意不为了测试而多加一个 `s16le` muxer。
