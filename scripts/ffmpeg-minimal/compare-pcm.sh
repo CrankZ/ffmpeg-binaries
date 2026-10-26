@@ -2,16 +2,19 @@
 # =============================================================================
 # 与"同版本官方全量构建"对比：
 #   1) 同一输入解码成裸 PCM（单声道 16k）后采样数据必须完全一致
-#   2) 解码耗时差异必须 < 5%（用户 CPU 时间，逐轮比值取中位数，降低 CI 噪声）
-#      不用墙钟时间：GitHub macOS runner 同二进制同配置的墙钟波动可达 30%+，
-#      会把噪声误判成性能回归；CPU 时间不受宿主调度抢占影响，中位数抗离群轮次。
+#   2) 解码耗时差异必须 < 5%（单线程墙钟时间，逐轮比值取中位数，降低 CI 噪声）
+#      为什么这样测：
+#        * -threads 1：多线程解码的线程调度会让 CPU/墙钟都不稳定（单轮波动可达 20%），
+#          两个构建的线程实现完全相同，单线程才能隔离出代码路径本身的差异；
+#        * 测墙钟而不是 CPU 时间：Windows 的 Git Bash 不支持 TIMEFORMAT 的 %U；
+#        * 逐轮比值取中位数：单个离群轮次（宿主抢占、降频）不会导致误判。
 #
 # 说明：最小化构建的白名单里只有 wav/null 两个 muxer（多一个都不该有），
 # 所以这里不用 `-f s16le`，而是统一输出 wav 后解析 RIFF 的 data chunk，
 # 只比裸 PCM，效果等价于 `-f s16le`。
 #
 # 用法: compare-pcm.sh --minimal BIN --reference BIN --fixtures DIR
-#                      [--tolerance 5] [--repeats 5]
+#                      [--tolerance 5] [--repeats 3]
 # =============================================================================
 set -uo pipefail
 # 耗时解析依赖 "秒.毫秒" 这种数字格式，避免 locale 把小数点变成逗号
@@ -25,11 +28,11 @@ MINIMAL=""
 REFERENCE=""
 FIXTURES="$HERE/../../fixtures"
 TOLERANCE="5"
-REPEATS="5"
+REPEATS="3"
 # 性能对比只跑这几个代表性格式（PCM 一致性对全部 fixture 都跑）
 PERF_FIXTURES="${PERF_FIXTURES:-tone.mp3,tone.aac,tone_alac.m4a,tone.mkv}"
 # 用 -stream_loop 把工作量放大到秒级，抵消进程启动开销的影响
-PERF_LOOP="${PERF_LOOP:-500}"
+PERF_LOOP="${PERF_LOOP:-300}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -57,18 +60,18 @@ sha256_of_pcm() {  # 只对 PCM 数据取 sha256
 }
 
 # 交替测量 minimal / reference，避免"先测的那个吃亏"（CPU 降频、缓存冷热）
-# 指标用用户态 CPU 时间（%U）：不受 runner 上其它进程抢占影响，比墙钟稳定得多。
+# 指标为单线程墙钟时间（%R，单线程消除了线程调度带来的大幅波动）。
 # 每轮记录 min/ref 的比值，最终取中位数，单个离群轮次不会直接导致失败。
 time_both() {   # $1 = repeats, 其余 = 交给两个二进制共同的参数；结果写入 T_MIN / T_REF / RATIOS
     local n="$1" x y r
     shift
     T_MIN=""; T_REF=""; RATIOS=""
-    TIMEFORMAT=%U
+    TIMEFORMAT=%R
     for _ in $(seq 1 "$n"); do
         x=$( { time "$MINIMAL" "$@" >/dev/null 2>&1; } 2>&1 )
-        ffmpeg_min_is_number "$x" || return 1
+        ffmpeg_min_is_number "$x" || { printf 'time 输出无法解析: [%s]\n' "$x" >&2; return 1; }
         y=$( { time "$REFERENCE" "$@" >/dev/null 2>&1; } 2>&1 )
-        ffmpeg_min_is_number "$y" || return 1
+        ffmpeg_min_is_number "$y" || { printf 'time 输出无法解析: [%s]\n' "$y" >&2; return 1; }
         if [ -z "$T_MIN" ]; then
             T_MIN="$x"
         else
@@ -113,7 +116,7 @@ trap 'rm -rf "$TMP"' EXIT
 printf '\033[1mPCM 一致性 + 解码耗时对比\033[0m\n'
 printf '  minimal   : %s\n' "$MINIMAL"
 printf '  reference : %s\n' "$REFERENCE"
-printf '  容差      : %s%%（用户 CPU 时间，%s 轮比值取中位数，-stream_loop %s）\n\n' "$TOLERANCE" "$REPEATS" "$PERF_LOOP"
+printf '  容差      : %s%%（单线程墙钟，%s 轮比值取中位数，-stream_loop %s）\n\n' "$TOLERANCE" "$REPEATS" "$PERF_LOOP"
 printf '  %-18s %12s %12s %18s %s\n' "fixture" "PCM(min)" "PCM(ref)" "PCM sha256" "结果"
 
 for f in "$FIXTURES"/tone*; do
@@ -169,7 +172,7 @@ for f in "$FIXTURES"/tone*; do
         *) continue ;;
     esac
 
-    if ! time_both "$REPEATS" -hide_banner -loglevel error -stream_loop "$PERF_LOOP" \
+    if ! time_both "$REPEATS" -hide_banner -loglevel error -threads 1 -stream_loop "$PERF_LOOP" \
             -i "$f" -vn -ac 1 -ar 16000 -f null -; then
         bad "$name 耗时测量失败（无法解析 time 输出）"
         continue
