@@ -72,9 +72,43 @@ ffmpeg_min_reference_reuse() {
     ffmpeg_min_log "复用缓存的参考构建: $bin"
 }
 
+# curl 公共参数：--retry-all-errors 才会重试 "Connection reset by peer" 这类网络错误
+ffmpeg_min_fetch() {  # $1=url $2=输出文件
+    curl -fsSL --http1.1 --retry 8 --retry-all-errors --retry-delay 5 \
+        --connect-timeout 30 --max-time 600 -o "$2" "$1"
+}
+
+ffmpeg_min_download_official() {  # $1=version $2=输出文件；成功时记录实际 URL
+    local version="$1" out="$2" url
+    for url in \
+        "$FFMPEG_MIRROR/ffmpeg-$version.tar.xz" \
+        "https://www.ffmpeg.org/releases/ffmpeg-$version.tar.xz"
+    do
+        ffmpeg_min_log "下载源码: $url"
+        rm -f "$out.part"
+        if ffmpeg_min_fetch "$url" "$out.part"; then
+            mv "$out.part" "$out"
+            FFMPEG_SOURCE_URL="$url"
+            return 0
+        fi
+        ffmpeg_min_warn "下载失败: $url"
+    done
+    return 1
+}
+
+ffmpeg_min_download_github() {  # $1=version $2=输出文件；GitHub tag 归档（与官方 tar.xz 内容等价）
+    local version="$1" out="$2"
+    local url="https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n$version"
+    ffmpeg_min_log "下载源码（GitHub 归档回退）: $url"
+    rm -f "$out.part"
+    ffmpeg_min_fetch "$url" "$out.part" || return 1
+    mv "$out.part" "$out"
+    FFMPEG_SOURCE_URL="$url"
+}
+
 # -----------------------------------------------------------------------------
 # 下载 + 解压源码，设置全局变量：
-#   FFMPEG_TARBALL / FFMPEG_SOURCE_SHA256 / FFMPEG_SRC
+#   FFMPEG_TARBALL / FFMPEG_SOURCE_URL / FFMPEG_SOURCE_SHA256 / FFMPEG_SRC
 # -----------------------------------------------------------------------------
 ffmpeg_min_source() {
     local version="$1" work="$2"
@@ -86,17 +120,34 @@ ffmpeg_min_source() {
     esac
 
     local dl="$work/dl" srcroot="$work/src"
+    local official="$dl/ffmpeg-$version.tar.xz"
+    local github="$dl/ffmpeg-$version-github.tar.gz"
+    local archive=""
     mkdir -p "$dl" "$srcroot"
 
-    FFMPEG_TARBALL="$dl/ffmpeg-$version.tar.xz"
-    if [ ! -s "$FFMPEG_TARBALL" ]; then
-        ffmpeg_min_log "下载 FFmpeg $version 源码"
-        curl -fsSL --retry 5 --retry-delay 3 --connect-timeout 20 \
-            -o "$FFMPEG_TARBALL.part" "$FFMPEG_MIRROR/ffmpeg-$version.tar.xz" ||
-            ffmpeg_min_die "下载失败: $FFMPEG_MIRROR/ffmpeg-$version.tar.xz"
-        mv "$FFMPEG_TARBALL.part" "$FFMPEG_TARBALL"
+    # 官方源在 GitHub runner 上偶发 "Connection reset by peer"；
+    # --retry-all-errors 才会重试这类网络错误（普通 --retry 只重试超时/5xx）。
+    if [ -s "$official" ]; then
+        archive="$official"
+        FFMPEG_SOURCE_URL="$FFMPEG_MIRROR/ffmpeg-$version.tar.xz"
+    elif [ -s "$github" ]; then
+        archive="$github"
+        FFMPEG_SOURCE_URL="https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n$version"
+    else
+        if ffmpeg_min_download_official "$version" "$official"; then
+            archive="$official"
+        else
+            # 官方 tar.xz 下载失败时回退到 GitHub tag 归档（内容等价的源码树）。
+            # 设置了 FFMPEG_SHA256 则不能回退：归档字节与官方 tar.xz 不同，无法校验。
+            [ -z "${FFMPEG_SHA256:-}" ] ||
+                ffmpeg_min_die "官方源码下载失败，且设置了 FFMPEG_SHA256，不能用 GitHub 归档替代"
+            ffmpeg_min_download_github "$version" "$github" ||
+                ffmpeg_min_die "源码下载失败：官方源与 GitHub 归档均不可用"
+            archive="$github"
+        fi
     fi
 
+    FFMPEG_TARBALL="$archive"
     FFMPEG_SOURCE_SHA256="$(ffmpeg_min_sha256 "$FFMPEG_TARBALL")"
     # 可选：强校验源码哈希，避免缓存/镜像被篡改导致产物不可复现
     if [ -n "${FFMPEG_SHA256:-}" ]; then
@@ -109,14 +160,19 @@ ffmpeg_min_source() {
     fi
     FFMPEG_SRC="$srcroot/ffmpeg-$version"
     if [ ! -d "$FFMPEG_SRC" ]; then
-        ffmpeg_min_log "解压源码"
-        tar -xf "$FFMPEG_TARBALL" -C "$srcroot"
+        ffmpeg_min_log "解压源码: $(basename "$FFMPEG_TARBALL")"
+        tar -xf "$FFMPEG_TARBALL" -C "$srcroot" ||
+            ffmpeg_min_die "解压失败: $FFMPEG_TARBALL"
+        # GitHub 归档解压出来是 FFmpeg-n<version>/，统一改名成 ffmpeg-<version>
+        if [ ! -d "$FFMPEG_SRC" ] && [ -d "$srcroot/FFmpeg-n$version" ]; then
+            mv "$srcroot/FFmpeg-n$version" "$FFMPEG_SRC"
+        fi
     fi
     [ -x "$FFMPEG_SRC/configure" ] || ffmpeg_min_die "源码目录异常: $FFMPEG_SRC"
 
     ffmpeg_min_log "源码: $FFMPEG_SRC"
     ffmpeg_min_log "源码 sha256: $FFMPEG_SOURCE_SHA256"
-    export FFMPEG_SRC FFMPEG_TARBALL FFMPEG_SOURCE_SHA256
+    export FFMPEG_SRC FFMPEG_TARBALL FFMPEG_SOURCE_URL FFMPEG_SOURCE_SHA256
 }
 
 # -----------------------------------------------------------------------------
@@ -231,7 +287,7 @@ ffmpeg_min_write_build_txt() {
         echo "========================================"
         echo
         echo "ffmpeg version : ${FFMPEG_VERSION:?}"
-        echo "source tarball : $FFMPEG_MIRROR/ffmpeg-$FFMPEG_VERSION.tar.xz"
+        echo "source tarball : ${FFMPEG_SOURCE_URL:-$FFMPEG_MIRROR/ffmpeg-$FFMPEG_VERSION.tar.xz}"
         echo "source sha256  : $FFMPEG_SOURCE_SHA256"
         echo "platform       : $platform"
         echo "build date     : $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

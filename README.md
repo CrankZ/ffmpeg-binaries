@@ -52,8 +52,8 @@ gh run watch
 
 | 输入 | 说明 |
 | --- | --- |
-| `ffmpeg_version` | 从哪里下载源码（`https://ffmpeg.org/releases/ffmpeg-<版本>.tar.xz`），只允许数字和 `.` |
-| `ffmpeg_sha256` | 可选；填了就对源码 tar.xz 做强校验，留空则只记录实际 sha256 到 `BUILD.txt` |
+| `ffmpeg_version` | 从哪里下载源码（优先 `https://ffmpeg.org/releases/ffmpeg-<版本>.tar.xz`，失败时回退到 GitHub `n<版本>` tag 归档），只允许数字和 `.` |
+| `ffmpeg_sha256` | 可选；填了就对源码 tar.xz 做强校验（同时禁用 GitHub 归档回退），留空则只记录实际 sha256 到 `BUILD.txt` |
 | `release_tag` | Release 名；4 个 zip + `SHA256SUMS.txt` 会发布到这个 tag |
 | `build_reference` | 是否额外构建一份同版本**全组件参考构建**（关闭 autodetect/网络，仅用于对照）做 PCM 一致性与解码耗时对比 |
 | `publish_release` | 是否发 Release（关掉就只在 Actions 里留 artifact） |
