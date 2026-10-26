@@ -2,19 +2,21 @@
 # =============================================================================
 # 与"同版本官方全量构建"对比：
 #   1) 同一输入解码成裸 PCM（单声道 16k）后采样数据必须完全一致
-#   2) 解码耗时差异必须 < 5%（单线程墙钟时间，逐轮比值取中位数，降低 CI 噪声）
+#   2) 解码耗时差异必须 < 5%（单线程墙钟；每轮交替测量顺序，用多轮总耗时比值判定）
 #      为什么这样测：
-#        * -threads 1：多线程解码的线程调度会让 CPU/墙钟都不稳定（单轮波动可达 20%），
-#          两个构建的线程实现完全相同，单线程才能隔离出代码路径本身的差异；
+#        * -threads 1：多线程解码的调度抖动会让单轮波动达 20-30%，两个构建的线程实现
+#          完全相同，单线程才能隔离出代码路径本身的差异；
 #        * 测墙钟而不是 CPU 时间：Windows 的 Git Bash 不支持 TIMEFORMAT 的 %U；
-#        * 逐轮比值取中位数：单个离群轮次（宿主抢占、降频）不会导致误判。
+#        * 交替顺序 + 总耗时比值：GitHub runner 的宿主抢占是随机的，单轮比值可能偏离
+#          10% 以上；把 minimal/ref 的测量顺序逐轮对调并按累计耗时算比值，噪声会互相抵消，
+#          单个离群轮次不会导致误判。
 #
 # 说明：最小化构建的白名单里只有 wav/null 两个 muxer（多一个都不该有），
 # 所以这里不用 `-f s16le`，而是统一输出 wav 后解析 RIFF 的 data chunk，
 # 只比裸 PCM，效果等价于 `-f s16le`。
 #
 # 用法: compare-pcm.sh --minimal BIN --reference BIN --fixtures DIR
-#                      [--tolerance 5] [--repeats 3]
+#                      [--tolerance 5] [--repeats 5]
 # =============================================================================
 set -uo pipefail
 # 耗时解析依赖 "秒.毫秒" 这种数字格式，避免 locale 把小数点变成逗号
@@ -28,7 +30,7 @@ MINIMAL=""
 REFERENCE=""
 FIXTURES="$HERE/../../fixtures"
 TOLERANCE="5"
-REPEATS="3"
+REPEATS="5"
 # 性能对比只跑这几个代表性格式（PCM 一致性对全部 fixture 都跑）
 PERF_FIXTURES="${PERF_FIXTURES:-tone.mp3,tone.aac,tone_alac.m4a,tone.mkv}"
 # 用 -stream_loop 把工作量放大到秒级，抵消进程启动开销的影响
@@ -59,34 +61,43 @@ sha256_of_pcm() {  # 只对 PCM 数据取 sha256
     tail -c +$((off + 1)) "$1" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | awk '{print $1}'
 }
 
-# 交替测量 minimal / reference，避免"先测的那个吃亏"（CPU 降频、缓存冷热）
-# 指标为单线程墙钟时间（%R，单线程消除了线程调度带来的大幅波动）。
-# 每轮记录 min/ref 的比值，最终取中位数，单个离群轮次不会直接导致失败。
-time_both() {   # $1 = repeats, 其余 = 交给两个二进制共同的参数；结果写入 T_MIN / T_REF / RATIOS
-    local n="$1" x y r
+# 单次计时：$1=二进制，其余=参数；把墙钟秒数打印到 stdout，解析失败返回 1
+time_one() {
+    local bin="$1" t
     shift
-    T_MIN=""; T_REF=""; RATIOS=""
+    t=$( { time "$bin" "$@" >/dev/null 2>&1; } 2>&1 )
+    ffmpeg_min_is_number "$t" || { printf 'time 输出无法解析: [%s]\n' "$t" >&2; return 1; }
+    printf '%s\n' "$t"
+}
+
+# 交替测量 minimal / reference，奇数轮 minimal 先跑、偶数轮 reference 先跑，
+# 抵消"谁先跑谁吃亏"（CPU 降频、缓存冷热、背景任务恰好落在某一侧）的系统性偏差。
+# 判定用累计耗时比值（噪声在两侧平均抵消），展示用每轮平均耗时。
+# 结果写入 AVG_MIN / AVG_REF / RATIO / RATIOS。
+time_both() {   # $1 = repeats, 其余 = 交给两个二进制共同的参数
+    local n="$1" i=0 x y r s_min=0 s_ref=0
+    shift
+    AVG_MIN=""; AVG_REF=""; RATIOS=""; RATIO=""
     TIMEFORMAT=%R
-    for _ in $(seq 1 "$n"); do
-        x=$( { time "$MINIMAL" "$@" >/dev/null 2>&1; } 2>&1 )
-        ffmpeg_min_is_number "$x" || { printf 'time 输出无法解析: [%s]\n' "$x" >&2; return 1; }
-        y=$( { time "$REFERENCE" "$@" >/dev/null 2>&1; } 2>&1 )
-        ffmpeg_min_is_number "$y" || { printf 'time 输出无法解析: [%s]\n' "$y" >&2; return 1; }
-        if [ -z "$T_MIN" ]; then
-            T_MIN="$x"
+    while [ "$i" -lt "$n" ]; do
+        i=$((i + 1))
+        if [ $((i % 2)) -eq 1 ]; then
+            x="$(time_one "$MINIMAL" "$@")" || return 1
+            y="$(time_one "$REFERENCE" "$@")" || return 1
         else
-            T_MIN="$(awk -v a="$x" -v b="$T_MIN" 'BEGIN { print (a+0 < b+0) ? a+0 : b+0 }')"
+            y="$(time_one "$REFERENCE" "$@")" || return 1
+            x="$(time_one "$MINIMAL" "$@")" || return 1
         fi
-        if [ -z "$T_REF" ]; then
-            T_REF="$y"
-        else
-            T_REF="$(awk -v a="$y" -v b="$T_REF" 'BEGIN { print (a+0 < b+0) ? a+0 : b+0 }')"
-        fi
+        s_min="$(awk -v a="$s_min" -v b="$x" 'BEGIN { printf "%.3f", a + b }')"
+        s_ref="$(awk -v a="$s_ref" -v b="$y" 'BEGIN { printf "%.3f", a + b }')"
         r="$(awk -v a="$x" -v b="$y" 'BEGIN { if (b+0 <= 0) print "n/a"; else printf "%.4f", a/b }')"
         [ "$r" = "n/a" ] && return 1
         RATIOS="$RATIOS $r"
     done
-    [ -n "$T_MIN" ] && [ -n "$T_REF" ] && [ -n "$RATIOS" ]
+    AVG_MIN="$(awk -v s="$s_min" -v n="$n" 'BEGIN { printf "%.3f", s/n }')"
+    AVG_REF="$(awk -v s="$s_ref" -v n="$n" 'BEGIN { printf "%.3f", s/n }')"
+    RATIO="$(awk -v a="$s_min" -v b="$s_ref" 'BEGIN { if (b+0 <= 0) print "n/a"; else printf "%.4f", a/b }')"
+    [ "$RATIO" != "n/a" ] && [ -n "$AVG_MIN" ] && [ -n "$AVG_REF" ] && [ -n "$RATIOS" ]
 }
 
 # PCM 差异定位：首个不同字节偏移 + 不同字节数（只在 sha 不相等时调用）
@@ -116,7 +127,7 @@ trap 'rm -rf "$TMP"' EXIT
 printf '\033[1mPCM 一致性 + 解码耗时对比\033[0m\n'
 printf '  minimal   : %s\n' "$MINIMAL"
 printf '  reference : %s\n' "$REFERENCE"
-printf '  容差      : %s%%（单线程墙钟，%s 轮比值取中位数，-stream_loop %s）\n\n' "$TOLERANCE" "$REPEATS" "$PERF_LOOP"
+printf '  容差      : %s%%（单线程墙钟，%s 轮交替顺序，按累计耗时比值判定，-stream_loop %s）\n\n' "$TOLERANCE" "$REPEATS" "$PERF_LOOP"
 printf '  %-18s %12s %12s %18s %s\n' "fixture" "PCM(min)" "PCM(ref)" "PCM sha256" "结果"
 
 for f in "$FIXTURES"/tone*; do
@@ -177,13 +188,8 @@ for f in "$FIXTURES"/tone*; do
         bad "$name 耗时测量失败（无法解析 time 输出）"
         continue
     fi
-    t_min="$T_MIN"; t_ref="$T_REF"
-    # shellcheck disable=SC2086  # RATIOS 是以空格分隔的列表，故意不加引号做分词
-    if ! ratio="$(ffmpeg_min_median $RATIOS)"; then
-        bad "$name 耗时测量失败（无法得到中位比值）"
-        continue
-    fi
-    delta="$(awk -v r="$ratio" 'BEGIN { printf "%.1f", (r - 1) * 100 }')"
+    t_min="$AVG_MIN"; t_ref="$AVG_REF"
+    delta="$(awk -v r="$RATIO" 'BEGIN { printf "%.1f", (r - 1) * 100 }')"
 
     if awk -v d="$delta" -v t="$TOLERANCE" 'BEGIN { exit !(d+0 <= t+0) }'; then
         ok "$name 解码耗时 ${t_min}s vs ${t_ref}s (Δ${delta}%)"
