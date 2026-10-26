@@ -2,21 +2,21 @@
 # =============================================================================
 # 与"同版本官方全量构建"对比：
 #   1) 同一输入解码成裸 PCM（单声道 16k）后采样数据必须完全一致
-#   2) 解码耗时差异必须 < 5%（单线程墙钟；每轮交替测量顺序，用多轮总耗时比值判定）
+#   2) 解码耗时差异必须 < 5%（单线程墙钟；先预热丢弃一轮，再测偶数轮并交替顺序）
 #      为什么这样测：
 #        * -threads 1：多线程解码的调度抖动会让单轮波动达 20-30%，两个构建的线程实现
 #          完全相同，单线程才能隔离出代码路径本身的差异；
 #        * 测墙钟而不是 CPU 时间：Windows 的 Git Bash 不支持 TIMEFORMAT 的 %U；
-#        * 交替顺序 + 总耗时比值：GitHub runner 的宿主抢占是随机的，单轮比值可能偏离
-#          10% 以上；把 minimal/ref 的测量顺序逐轮对调并按累计耗时算比值，噪声会互相抵消，
-#          单个离群轮次不会导致误判。
+#        * 预热 + 交替顺序 + 偶数轮累计耗时比值：实测"同一对里后跑的那个快约 30%"
+#          （CPU 升频 / 页缓存），先跑一轮丢弃做预热；测量轮数取偶数，保证两个二进制
+#          各占一半"先跑"名额，累计耗时比值恰好抵消顺序偏差。
 #
 # 说明：最小化构建的白名单里只有 wav/null 两个 muxer（多一个都不该有），
 # 所以这里不用 `-f s16le`，而是统一输出 wav 后解析 RIFF 的 data chunk，
 # 只比裸 PCM，效果等价于 `-f s16le`。
 #
 # 用法: compare-pcm.sh --minimal BIN --reference BIN --fixtures DIR
-#                      [--tolerance 5] [--repeats 5]
+#                      [--tolerance 5] [--repeats 4]
 # =============================================================================
 set -uo pipefail
 # 耗时解析依赖 "秒.毫秒" 这种数字格式，避免 locale 把小数点变成逗号
@@ -30,7 +30,7 @@ MINIMAL=""
 REFERENCE=""
 FIXTURES="$HERE/../../fixtures"
 TOLERANCE="5"
-REPEATS="5"
+REPEATS="4"
 # 性能对比只跑这几个代表性格式（PCM 一致性对全部 fixture 都跑）
 PERF_FIXTURES="${PERF_FIXTURES:-tone.mp3,tone.aac,tone_alac.m4a,tone.mkv}"
 # 用 -stream_loop 把工作量放大到秒级，抵消进程启动开销的影响
@@ -70,15 +70,21 @@ time_one() {
     printf '%s\n' "$t"
 }
 
-# 交替测量 minimal / reference，奇数轮 minimal 先跑、偶数轮 reference 先跑，
-# 抵消"谁先跑谁吃亏"（CPU 降频、缓存冷热、背景任务恰好落在某一侧）的系统性偏差。
-# 判定用累计耗时比值（噪声在两侧平均抵消），展示用每轮平均耗时。
+# 先各跑一次做预热（结果丢弃），让 CPU 升频、页缓存进入稳定状态；
+# 然后测偶数轮并交替顺序：奇数轮 minimal 先跑、偶数轮 reference 先跑，
+# 两个二进制各占一半"先跑"名额，累计耗时比值恰好抵消顺序带来的系统性偏差。
+# 判定用累计耗时比值，展示用每轮平均耗时。
 # 结果写入 AVG_MIN / AVG_REF / RATIO / RATIOS。
 time_both() {   # $1 = repeats, 其余 = 交给两个二进制共同的参数
     local n="$1" i=0 x y r s_min=0 s_ref=0
     shift
     AVG_MIN=""; AVG_REF=""; RATIOS=""; RATIO=""
     TIMEFORMAT=%R
+    # 预热（丢弃）
+    time_one "$MINIMAL" "$@" >/dev/null || return 1
+    time_one "$REFERENCE" "$@" >/dev/null || return 1
+    # 测量轮数必须为偶数，否则"先跑"名额不对等，顺序偏差无法抵消
+    [ $((n % 2)) -eq 0 ] || n=$((n + 1))
     while [ "$i" -lt "$n" ]; do
         i=$((i + 1))
         if [ $((i % 2)) -eq 1 ]; then
@@ -127,7 +133,7 @@ trap 'rm -rf "$TMP"' EXIT
 printf '\033[1mPCM 一致性 + 解码耗时对比\033[0m\n'
 printf '  minimal   : %s\n' "$MINIMAL"
 printf '  reference : %s\n' "$REFERENCE"
-printf '  容差      : %s%%（单线程墙钟，%s 轮交替顺序，按累计耗时比值判定，-stream_loop %s）\n\n' "$TOLERANCE" "$REPEATS" "$PERF_LOOP"
+printf '  容差      : %s%%（单线程墙钟，预热 1 轮丢弃，%s 轮交替顺序按累计耗时比值判定，-stream_loop %s）\n\n' "$TOLERANCE" "$REPEATS" "$PERF_LOOP"
 printf '  %-18s %12s %12s %18s %s\n' "fixture" "PCM(min)" "PCM(ref)" "PCM sha256" "结果"
 
 for f in "$FIXTURES"/tone*; do
