@@ -126,5 +126,7 @@ ffmpeg_min_common_args() {
 # -----------------------------------------------------------------------------
 FFMPEG_MIN_OPTFLAGS="${FFMPEG_MIN_OPTFLAGS:--O3}"
 
-# 冒烟测试里用来确认"跑的是我们这份裁剪构建"的版本后缀
-FFMPEG_MIN_EXTRA_VERSION="-minimal"
+# 冒烟测试里用来确认"跑的是我们这份裁剪构建"的版本后缀。
+# FFmpeg 会在版本号后自动补一个连字符，所以这里不带前导 "-"：
+# extra_version=minimal -> "ffmpeg version 9.0.2-minimal"
+FFMPEG_MIN_EXTRA_VERSION="minimal"

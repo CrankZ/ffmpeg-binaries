@@ -116,7 +116,7 @@ ffmpeg_min_source() {
     # 版本号会参与 URL / 缓存 key / 解压路径，只允许常规版本文本
     case "$version" in
         *[!0-9A-Za-z._-]*|.*|*..*)
-            ffmpeg_min_die "FFMPEG_VERSION 非法: $version（只允许字母数字 . _ -）" ;;
+            ffmpeg_min_die "FFMPEG_VERSION 非法: ${version}（只允许字母数字 . _ -）" ;;
     esac
 
     local dl="$work/dl" srcroot="$work/src"
@@ -260,7 +260,7 @@ ffmpeg_min_package() {
     ffmpeg_min_write_build_txt "$stage/BUILD.txt" "$builddir" "$platform"
     # 机器可读的版本标记：Release 校验和运行时排查都直接读这一行
     {
-        echo "ffmpeg ${FFMPEG_VERSION}${FFMPEG_MIN_EXTRA_VERSION:--minimal}"
+        echo "ffmpeg ${FFMPEG_VERSION}-${FFMPEG_MIN_EXTRA_VERSION:-minimal}"
         echo "source sha256: $FFMPEG_SOURCE_SHA256"
     } > "$stage/VERSION"
 

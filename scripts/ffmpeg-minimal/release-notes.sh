@@ -12,7 +12,7 @@ VERSION="${FFMPEG_VERSION:-unknown}"
 
 case "$TAG" in
     *[!A-Za-z0-9._-]*|.*|*..*)
-        echo "ERROR: tag 非法: $TAG（只允许字母数字 . _ -）" >&2
+        echo "ERROR: tag 非法: ${TAG}（只允许字母数字 . _ -）" >&2
         exit 2 ;;
 esac
 

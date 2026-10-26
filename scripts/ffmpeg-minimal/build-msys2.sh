@@ -35,7 +35,7 @@ esac
 BUILD_TARGET="${BUILD_TARGET:-all}"
 case "$BUILD_TARGET" in
     all|minimal|reference) ;;
-    *) ffmpeg_min_die "BUILD_TARGET 只能是 all | minimal | reference（当前: $BUILD_TARGET）" ;;
+    *) ffmpeg_min_die "BUILD_TARGET 只能是 all | minimal | reference（当前: ${BUILD_TARGET}）" ;;
 esac
 
 DO_MINIMAL=0

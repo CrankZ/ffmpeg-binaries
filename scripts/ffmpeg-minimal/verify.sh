@@ -83,15 +83,15 @@ CONFIG_LINE="$(printf '%s' "$VERSION_OUT" | grep -m1 '^configuration:' || true)"
 # CI 里还会与输入 FFMPEG_VERSION 比对，防止缓存/源码串台后发布错版本。
 if VER_TOKEN="$(ffmpeg_min_binary_version "$VERSION_OUT")"; then
     case "$VER_TOKEN" in
-        *-minimal) ok "版本号带 -minimal 后缀（$VER_TOKEN）" ;;
+        *-minimal) ok "版本号带 -minimal 后缀（${VER_TOKEN}）" ;;
         *) bad "版本号缺少 -minimal 后缀: $VER_TOKEN" ;;
     esac
     VER_CORE="${VER_TOKEN%-minimal}"
     if [ -n "${FFMPEG_VERSION:-}" ]; then
         if [ "$VER_CORE" = "$FFMPEG_VERSION" ]; then
-            ok "版本号与预期一致（$FFMPEG_VERSION）"
+            ok "版本号与预期一致（${FFMPEG_VERSION}）"
         else
-            bad "版本号不符: 期望 $FFMPEG_VERSION，实际 $VER_CORE"
+            bad "版本号不符: 期望 ${FFMPEG_VERSION}，实际 $VER_CORE"
         fi
     else
         info "未设置 FFMPEG_VERSION，跳过版本号比对"
@@ -118,7 +118,7 @@ for flag in --disable-swscale --disable-avdevice; do
     if printf '%s' "$CONFIG_LINE" | grep -q -- "$flag"; then
         ok "已关闭 $flag"
     else
-        bad "未关闭 $flag（体积/依赖不应包含它）"
+        bad "未关闭 ${flag}（体积/依赖不应包含它）"
     fi
 done
 
