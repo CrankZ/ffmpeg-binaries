@@ -24,7 +24,7 @@ ffmpeg -hide_banner -i <文件> -vn -f null -
 
 | zip | 内容 | 体积目标 |
 | --- | --- | --- |
-| `ffmpeg-win-x64.zip` | `ffmpeg.exe` + `LICENSE` + `BUILD.txt` | 9–14 MB |
+| `ffmpeg-win-x64.zip` | `ffmpeg.exe` + `LICENSE` + `BUILD.txt` + `VERSION` | 9–14 MB |
 | `ffmpeg-macos-arm64.zip` | `ffmpeg` + … | 7–11 MB |
 | `ffmpeg-macos-x64.zip` | `ffmpeg` + … | 7–12 MB |
 | `ffmpeg-macos-universal.zip` | `ffmpeg`（arm64 + x86_64） | 14–22 MB |
@@ -55,7 +55,7 @@ gh run watch
 | `ffmpeg_version` | 从哪里下载源码（优先 `https://ffmpeg.org/releases/ffmpeg-<版本>.tar.xz`，失败时回退到 GitHub `n<版本>` tag 归档），只允许数字和 `.` |
 | `ffmpeg_sha256` | 可选；填了就对源码 tar.xz 做强校验（同时禁用 GitHub 归档回退），留空则只记录实际 sha256 到 `BUILD.txt` |
 | `release_tag` | Release 名；4 个 zip + `SHA256SUMS.txt` 会发布到这个 tag |
-| `build_reference` | 是否额外构建一份同版本**全组件参考构建**（关闭 autodetect/网络，仅用于对照）做 PCM 一致性与解码耗时对比 |
+| `build_reference` | 是否额外构建一份同版本**全组件参考构建**（关闭 autodetect/网络，仅用于对照）做 PCM 一致性与解码耗时对比。默认关闭以节省 runner 时间；`publish_release=true` 时必须同时开启，否则 validate 会直接拒绝 |
 | `publish_release` | 是否发 Release（关掉就只构建并验收，不发布） |
 
 流水线先跑一个几秒的 `test-scripts`（离线单测）作为门禁，之后各构建 job **并行**执行
@@ -64,7 +64,7 @@ universal 只做 lipo，最后由 release 汇总；同时带三类缓存：
 
 | 缓存 | 作用 |
 | --- | --- |
-| `work/dl` | FFmpeg 源码 tar.xz（按版本 + 平台） |
+| `work/dl` | FFmpeg 源码 tar.xz（按版本 + OS，同一 OS 的多个 job 共享，避免重复下载） |
 | `.ccache` | ccache 对象缓存，重跑/换 tag 时大幅减少 make 时间 |
 | `work/build/ref-*` | 参考构建二进制，命中且版本一致时**整段跳过全量编译** |
 | `xfer-*` | 同一次 run 内**同一 OS** 的 job 之间传递二进制（compare / universal 用）；zip 走 artifact 传给 release |
@@ -167,7 +167,7 @@ FFmpeg 的构建系统不支持给单个文件加编译选项，而实测（CI r
 ## 单元测试（不构建、不联网）
 
 `scripts/ffmpeg-minimal/lib/parse.sh` 里的纯解析逻辑（RIFF chunk 遍历、PCM 偏移/长度、
-`Duration:` 行、组件名映射）由 `tests/run-tests.sh` 用现场构造的 wav 字节覆盖，
+`Duration:` 行、`ffmpeg -version` 版本串、组件名映射）由 `tests/run-tests.sh` 用现场构造的 wav 字节覆盖，
 CI 在任何构建之前先跑这个 job（几秒完成，失败则所有构建直接跳过）：
 
 ```bash
@@ -180,14 +180,17 @@ bash scripts/ffmpeg-minimal/tests/run-tests.sh -v   # 同时打印通过的用�
 
 ## 验收清单（CI 自动执行，失败即 job 失败）
 
-1. `ffmpeg -version` 正常输出，且配置行含 `--disable-everything`，不含 `--enable-small` / `--disable-asm`
+1. `ffmpeg -version` 正常输出；首行版本号带 `-minimal` 且与输入的 `ffmpeg_version` 一致；
+   配置行含 `--disable-everything`，不含 `--enable-small` / `--disable-asm`
 2. Windows：`objdump -p ffmpeg.exe` 的 `DLL Name` 只有系统 DLL（`api-ms-win-*` 视为系统 API Set）
-3. macOS：`otool -L` 只有系统库；`lipo -archs` 含期望架构；`minos >= 13.0`；已签名
+3. macOS：`otool -L` 只有系统库；`lipo -archs` 含期望架构；`minos >= 13.0`；已签名；
+   arm64 构建断言 `HAVE_NEON 1`，x86_64 断言 `HAVE_X86ASM 1`
 4. `fixtures/` 里每个样本逐个跑：输出管道、预转 WAV 文件、`Duration:` 探测；PCM 非空、
    `-ac 1 -ar 16000` 真实生效（解析 wav 头）、`Duration:` 数值与解码出的 PCM 长度吻合
-5. 额外冒烟：`-i pipe:0` 输入管道、消费者提前关闭输出管道时不挂死、`-t 2` 截断（视频容器 + 纯音频）
+5. 额外冒烟：`-i pipe:0` 输入管道、消费者提前关闭输出管道时不挂死、`-t 2` 截断（视频容器 + 纯音频）、
+   损坏输入必须非 0 退出、路径含空格可用；universal 的 x86_64 切片在 Rosetta 下可执行
 6. 与同版本**全组件参考构建**对同一文件输出 PCM 做 SHA256 对比，并比较解码耗时（差异需 < 5%，取多次最优）
-7. 产物体积与目标区间对比，写进 Release 说明
+7. 产物体积与目标区间对比，写进 Release 说明；zip 内 `VERSION` 必须与输入的 `ffmpeg_version` 一致
 
 > 对比 PCM 时统一输出 `-f wav`，解析 RIFF 的 `data` chunk 后只比裸 PCM —— 因为最小化构建的
 > muxer 白名单里只有 `wav` / `null`，故意不为了测试而多加一个 `s16le` muxer。

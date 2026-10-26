@@ -185,6 +185,23 @@ ffmpeg_min_is_number() {
     printf '%s' "$1" | grep -qE '^[0-9]+([.][0-9]+)?$'
 }
 
+# 从 `ffmpeg -version` 输出解析版本 token（首行形如
+# "ffmpeg version 9.0.2-minimal Copyright (c) ..."）。
+# 成功输出 "9.0.2-minimal"；不是 ffmpeg 的版式或版本为空时返回 1。
+ffmpeg_min_binary_version() {
+    local first token
+    first="${1%%$'\n'*}"
+    case "$first" in
+        "ffmpeg version "*) ;;
+        *) return 1 ;;
+    esac
+    token="${first#ffmpeg version }"
+    token="${token%% *}"
+    token="${token%$'\r'}"
+    [ -n "$token" ] || return 1
+    printf '%s\n' "$token"
+}
+
 # configure 里的组件名 -> ffmpeg 运行时打印的名字
 ffmpeg_min_runtime_name() {
     case "$1" in

@@ -105,7 +105,10 @@ build_arch() {
     ffmpeg_min_configure "$builddir" "$platform_label" "${extra[@]}" \
         ${FFMPEG_MIN_CC_ARGS[@]+"${FFMPEG_MIN_CC_ARGS[@]}"}
 
-    if [ "$arch" = "x86_64" ]; then
+    if [ "$arch" = "arm64" ]; then
+        grep -q 'HAVE_NEON 1' "$builddir/config.h" ||
+            ffmpeg_min_die "configure 未启用 NEON（HAVE_NEON=0），arm64 性能不可接受"
+    else
         grep -q 'HAVE_X86ASM 1' "$builddir/config.h" ||
             ffmpeg_min_die "configure 未启用 x86 汇编（HAVE_X86ASM=0），性能不可接受"
     fi

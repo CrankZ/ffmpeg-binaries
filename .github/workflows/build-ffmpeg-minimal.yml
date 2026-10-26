@@ -29,7 +29,7 @@ on:
       build_reference:
         description: "额外构建同版本全量版本做 PCM 一致性 / 解码耗时对比"
         type: boolean
-        default: true
+        default: false
       publish_release:
         description: "发布 GitHub Release"
         type: boolean
@@ -67,6 +67,8 @@ jobs:
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
+          BUILD_REFERENCE: ${{ inputs.build_reference }}
         run: |
           set -euo pipefail
           [[ "$FFMPEG_VERSION" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]] || {
@@ -76,6 +78,10 @@ jobs:
           if [ -n "$FFMPEG_SHA256" ]; then
             [[ "$FFMPEG_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || {
               echo "非法 ffmpeg_sha256（应为 64 位十六进制）"; exit 1; }
+          fi
+          # 发布必须带性能/PCM 对照，不允许跳过参考构建后直接发版
+          if [ "$PUBLISH_RELEASE" = "true" ] && [ "$BUILD_REFERENCE" != "true" ]; then
+            echo "publish_release=true 时必须同时开启 build_reference"; exit 1
           fi
           echo "输入校验通过: ffmpeg $FFMPEG_VERSION -> $RELEASE_TAG"
 
@@ -111,7 +117,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: work/dl
-          key: ffmpeg-src-win-min-${{ inputs.ffmpeg_version }}
+          key: ffmpeg-src-win-${{ inputs.ffmpeg_version }}
 
       - name: 缓存 ccache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -184,13 +190,13 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: work/dl
-          key: ffmpeg-src-win-ref-${{ inputs.ffmpeg_version }}
+          key: ffmpeg-src-win-${{ inputs.ffmpeg_version }}
 
       - name: 缓存参考构建产物（命中则跳过全量编译）
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: work/build/ref-win-x64/ffmpeg.exe
-          key: ffmpeg-ref-win-x64-${{ inputs.ffmpeg_version }}-${{ hashFiles('scripts/ffmpeg-minimal/common.sh', '.github/workflows/build-ffmpeg-minimal.yml') }}
+          key: ffmpeg-ref-win-x64-${{ inputs.ffmpeg_version }}-${{ hashFiles('scripts/ffmpeg-minimal/common.sh') }}
 
       - name: 缓存 ccache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -286,7 +292,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: work/dl
-          key: ffmpeg-src-macos-arm64-${{ inputs.ffmpeg_version }}
+          key: ffmpeg-src-macos-${{ inputs.ffmpeg_version }}
 
       - name: 缓存 ccache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -344,7 +350,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: work/dl
-          key: ffmpeg-src-macos-x64-${{ inputs.ffmpeg_version }}
+          key: ffmpeg-src-macos-${{ inputs.ffmpeg_version }}
 
       - name: 缓存 ccache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -427,7 +433,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: work/dl
-          key: ffmpeg-src-macos-universal-${{ inputs.ffmpeg_version }}
+          key: ffmpeg-src-macos-${{ inputs.ffmpeg_version }}
           restore-keys: |
             ffmpeg-src-macos-
 
@@ -444,6 +450,15 @@ jobs:
           bash scripts/ffmpeg-minimal/verify.sh \
             --binary work/build/macos-universal/ffmpeg \
             --platform macos-universal --archs arm64,x86_64 --quick
+
+      - name: 安装 Rosetta（用于执行 universal 的 x86_64 切片）
+        run: |
+          sudo softwareupdate --install-rosetta --agree-to-license || true
+          arch -x86_64 /usr/bin/true || { echo "Rosetta 不可用"; exit 1; }
+
+      - name: 验证 universal 的 x86_64 切片可执行（Rosetta 下快速冒烟）
+        run: |
+          arch -x86_64 work/build/macos-universal/ffmpeg -hide_banner -version | head -n 1
 
       - name: 保存 universal 产物到缓存
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -474,13 +489,13 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: work/dl
-          key: ffmpeg-src-macos-ref-${{ inputs.ffmpeg_version }}
+          key: ffmpeg-src-macos-${{ inputs.ffmpeg_version }}
 
       - name: 缓存参考构建产物（命中则跳过全量编译）
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: work/build/ref-macos-arm64/ffmpeg
-          key: ffmpeg-ref-macos-arm64-${{ inputs.ffmpeg_version }}-${{ hashFiles('scripts/ffmpeg-minimal/common.sh', '.github/workflows/build-ffmpeg-minimal.yml') }}
+          key: ffmpeg-ref-macos-arm64-${{ inputs.ffmpeg_version }}-${{ hashFiles('scripts/ffmpeg-minimal/common.sh') }}
 
       - name: 缓存 ccache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

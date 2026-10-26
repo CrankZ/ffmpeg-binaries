@@ -258,9 +258,14 @@ ffmpeg_min_package() {
     cp "$bin" "$stage/$name"
     cp "$FFMPEG_SRC/COPYING.LGPLv2.1" "$stage/LICENSE"
     ffmpeg_min_write_build_txt "$stage/BUILD.txt" "$builddir" "$platform"
+    # 机器可读的版本标记：Release 校验和运行时排查都直接读这一行
+    {
+        echo "ffmpeg ${FFMPEG_VERSION}${FFMPEG_MIN_EXTRA_VERSION:--minimal}"
+        echo "source sha256: $FFMPEG_SOURCE_SHA256"
+    } > "$stage/VERSION"
 
     rm -f "$outdir/$zipname"
-    ( cd "$stage" && zip -q -9 -X "$outdir/$zipname" "$name" LICENSE BUILD.txt ) ||
+    ( cd "$stage" && zip -q -9 -X "$outdir/$zipname" "$name" LICENSE BUILD.txt VERSION ) ||
         ffmpeg_min_die "打包失败: $outdir/$zipname"
 
     ffmpeg_min_log "产物: $outdir/$zipname ($(ffmpeg_min_size_mb "$outdir/$zipname") MB)"

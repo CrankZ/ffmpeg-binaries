@@ -233,6 +233,30 @@ ffmpeg_min_is_number "12.3 "; expect_rc 1 "$?" "带尾随空格不是数字"
 ffmpeg_min_is_number "";     expect_rc 1 "$?" "空串不是数字"
 
 # ===========================================================================
+group "binary_version：从 -version 首行解析版本"
+# ===========================================================================
+expect_eq "9.0.2-minimal" \
+    "$(ffmpeg_min_binary_version 'ffmpeg version 9.0.2-minimal Copyright (c) 2000-2026 the FFmpeg developers')" \
+    "标准首行 -> 9.0.2-minimal"
+expect_eq "9.0.2-minimal" \
+    "$(ffmpeg_min_binary_version "$(printf '%s\n' 'ffmpeg version 9.0.2-minimal Copyright' 'built with gcc')")" \
+    "多行输出只取首行"
+expect_eq "N-124530-gf435ce22e1" \
+    "$(ffmpeg_min_binary_version 'ffmpeg version N-124530-gf435ce22e1 Copyright')" \
+    "snapshot 版本也可解析"
+out="$(ffmpeg_min_binary_version 'not an ffmpeg banner')"; rc=$?
+expect_rc 1 "$rc" "非 ffmpeg 版式 -> 返回 1"
+out="$(ffmpeg_min_binary_version 'ffmpeg version ')"
+expect_eq "" "$out" "版本为空 -> 无输出"
+ffmpeg_min_binary_version 'ffmpeg version ' >/dev/null; expect_rc 1 "$?" "版本为空 -> 返回 1"
+expect_eq "9.0.2-minimal" \
+    "$(ffmpeg_min_binary_version "$(printf 'ffmpeg version 9.0.2-minimal Copyright\r\nbuilt with clang')")" \
+    "CRLF 输出也能处理"
+expect_eq "9.0.2-minimal" \
+    "$(ffmpeg_min_binary_version "$(printf 'ffmpeg version 9.0.2-minimal\r\n')")" \
+    "CRLF 且无后续字段时去掉尾部 \r"
+
+# ===========================================================================
 group "runtime_name：configure 名 -> 运行时名"
 # ===========================================================================
 expect_eq "mpeg"        "$(ffmpeg_min_runtime_name mpegps)"    "mpegps -> mpeg"

@@ -79,6 +79,27 @@ fi
 info "$(printf '%s' "$VERSION_OUT" | head -n 1)"
 CONFIG_LINE="$(printf '%s' "$VERSION_OUT" | grep -m1 '^configuration:' || true)"
 
+# 版本号一致性：首行必须是 "ffmpeg version <ver>"，且带 -minimal 后缀；
+# CI 里还会与输入 FFMPEG_VERSION 比对，防止缓存/源码串台后发布错版本。
+if VER_TOKEN="$(ffmpeg_min_binary_version "$VERSION_OUT")"; then
+    case "$VER_TOKEN" in
+        *-minimal) ok "版本号带 -minimal 后缀（$VER_TOKEN）" ;;
+        *) bad "版本号缺少 -minimal 后缀: $VER_TOKEN" ;;
+    esac
+    VER_CORE="${VER_TOKEN%-minimal}"
+    if [ -n "${FFMPEG_VERSION:-}" ]; then
+        if [ "$VER_CORE" = "$FFMPEG_VERSION" ]; then
+            ok "版本号与预期一致（$FFMPEG_VERSION）"
+        else
+            bad "版本号不符: 期望 $FFMPEG_VERSION，实际 $VER_CORE"
+        fi
+    else
+        info "未设置 FFMPEG_VERSION，跳过版本号比对"
+    fi
+else
+    bad "无法从 -version 首行解析版本号"
+fi
+
 if printf '%s' "$CONFIG_LINE" | grep -q -- '--disable-everything'; then
     ok "配置含 --disable-everything（组件已裁剪）"
 else
@@ -481,6 +502,36 @@ if [ -n "$AUDIO_SRC" ]; then
         fi
     else
         bad "-t 2 纯音频调用失败"
+    fi
+fi
+
+# ---- 8) 损坏 / 非媒体输入：必须非 0 退出，不能挂死 ----
+printf 'this is definitely not a media file\n' > "$TMP/garbage.mp4"
+if "$BIN_ABS" -hide_banner -loglevel error -i "$TMP/garbage.mp4" -vn -f null - \
+        >"$TMP/garbage.out" 2>"$TMP/garbage.err"; then
+    bad "损坏输入被当作成功（应非 0 退出）"
+else
+    ok "损坏输入以非 0 退出"
+fi
+
+# ---- 9) 路径含空格（用户选择的文件路径经常带空格）----
+SPACE_SRC="$(ls "$FIXTURES"/tone.mp3 2>/dev/null | head -n 1)"
+[ -n "$SPACE_SRC" ] || SPACE_SRC="$(ls "$FIXTURES"/*.wav 2>/dev/null | head -n 1)"
+if [ -n "$SPACE_SRC" ]; then
+    ext="${SPACE_SRC##*.}"
+    SPACE_IN="$TMP/tone with spaces.$ext"
+    cp "$SPACE_SRC" "$SPACE_IN"
+    if "$BIN_ABS" -hide_banner -loglevel error -i "$SPACE_IN" -vn -ac 1 -ar 16000 \
+            -f wav -acodec pcm_s16le - > "$TMP/space.wav" 2>"$TMP/space.err"; then
+        sp_sz="$(file_size "$TMP/space.wav")"
+        if [ "$sp_sz" -gt 32000 ]; then
+            ok "路径含空格可用（$(basename "$SPACE_IN") -> $sp_sz bytes）"
+            wav_fmt_check "$TMP/space.wav" "含空格路径" || true
+        else
+            bad "含空格路径输出太小: $sp_sz bytes"
+        fi
+    else
+        bad "含空格路径解码失败: $(head -n 2 "$TMP/space.err" | tr '\n' ' ')"
     fi
 fi
 
