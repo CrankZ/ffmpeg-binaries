@@ -2,7 +2,10 @@
 # =============================================================================
 # 与"同版本官方全量构建"对比：
 #   1) 同一输入解码成裸 PCM（单声道 16k）后采样数据必须完全一致
-#   2) 解码耗时差异必须 < 5%（单线程 + ffmpeg 自带 -benchmark 的 utime，交替顺序多轮累计）
+#   2) 解码耗时差异不得比参考构建慢 10% 以上（单线程 + ffmpeg -benchmark 的 utime，多轮交替）
+#      阈值 10% 的来源：同一对二进制在同一 runner 上实测正负偏差可达 ±10%（宿主噪声），
+#      5% 会把噪声误判成回归；-O2 这类真实退化是 +75%，10% 的门口仍能拦住。
+#      只判"更慢"：最小化构建比参考更快不是问题。
 #      为什么这样测：
 #        * -threads 1：多线程解码的调度抖动会让单轮波动达 20-30%，两个构建的线程实现
 #          完全相同，单线程才能隔离出代码路径本身的差异；
@@ -16,7 +19,7 @@
 # 只比裸 PCM，效果等价于 `-f s16le`。
 #
 # 用法: compare-pcm.sh --minimal BIN --reference BIN --fixtures DIR
-#                      [--tolerance 5] [--repeats 4]
+#                      [--tolerance 10] [--repeats 4]
 # =============================================================================
 set -uo pipefail
 # 耗时解析依赖 "秒.毫秒" 这种数字格式，避免 locale 把小数点变成逗号
@@ -29,7 +32,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 MINIMAL=""
 REFERENCE=""
 FIXTURES="$HERE/../../fixtures"
-TOLERANCE="5"
+TOLERANCE="10"
 REPEATS="4"
 # 性能对比只跑这几个代表性格式（PCM 一致性对全部 fixture 都跑）
 PERF_FIXTURES="${PERF_FIXTURES:-tone.mp3,tone.aac,tone_alac.m4a,tone.mkv}"
