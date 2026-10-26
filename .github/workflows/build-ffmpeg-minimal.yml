@@ -143,6 +143,14 @@ jobs:
             work/build/win-x64/ffmpeg.exe
           key: xfer-win-min-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
 
+      - name: 上传 zip（供 release 使用）
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: win-minimal-zip
+          path: work/dist/ffmpeg-win-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+
   # 全量参考构建单独占一个 runner，和 minimal 并行；产物按版本缓存，重跑可直接复用。
   win-reference:
     name: Windows x64 reference（全量对照，不发布）
@@ -297,6 +305,14 @@ jobs:
             work/dist/ffmpeg-macos-arm64.zip
           key: xfer-macos-arm64-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
 
+      - name: 上传 zip（供 release 使用）
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-arm64-zip
+          path: work/dist/ffmpeg-macos-arm64.zip
+          if-no-files-found: error
+          retention-days: 14
+
   macos-x64:
     name: macOS x86_64 minimal（Rosetta 验证）
     needs: validate
@@ -351,6 +367,14 @@ jobs:
             work/build/macos-x86_64/configure.cmd
             work/dist/ffmpeg-macos-x64.zip
           key: xfer-macos-x64-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
+
+      - name: 上传 zip（供 release 使用）
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-x64-zip
+          path: work/dist/ffmpeg-macos-x64.zip
+          if-no-files-found: error
+          retention-days: 14
 
   macos-universal:
     name: macOS universal（lipo）
@@ -409,6 +433,14 @@ jobs:
         with:
           path: work/dist/ffmpeg-macos-universal.zip
           key: xfer-macos-universal-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
+
+      - name: 上传 zip（供 release 使用）
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-universal-zip
+          path: work/dist/ffmpeg-macos-universal.zip
+          if-no-files-found: error
+          retention-days: 14
 
   macos-reference:
     name: macOS arm64 reference（全量对照，不发布）
@@ -530,41 +562,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 恢复 Windows 产物
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      # 用 artifact 而不是 cache 收集 zip：cache 不支持跨 OS 恢复（release 跑在 Linux 上，
+      # 而三个产物来自 Windows/macOS runner），artifact 天然跨平台且公开仓库免费。
+      - name: 收集四个平台的 zip 产物
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          path: |
-            work/dist/ffmpeg-win-x64.zip
-            work/build/win-x64/ffmpeg.exe
-          key: xfer-win-min-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
-          fail-on-cache-miss: true
-
-      - name: 恢复 macOS arm64 产物
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            work/build/macos-arm64/ffmpeg
-            work/build/macos-arm64/configure.cmd
-            work/dist/ffmpeg-macos-arm64.zip
-          key: xfer-macos-arm64-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
-          fail-on-cache-miss: true
-
-      - name: 恢复 macOS x86_64 产物
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            work/build/macos-x86_64/ffmpeg
-            work/build/macos-x86_64/configure.cmd
-            work/dist/ffmpeg-macos-x64.zip
-          key: xfer-macos-x64-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
-          fail-on-cache-miss: true
-
-      - name: 恢复 macOS universal 产物
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: work/dist/ffmpeg-macos-universal.zip
-          key: xfer-macos-universal-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
-          fail-on-cache-miss: true
+          pattern: '*-zip'
+          path: work/dist
+          merge-multiple: true
 
       - name: 生成 SHA256SUMS 与 Release 说明
         run: |
