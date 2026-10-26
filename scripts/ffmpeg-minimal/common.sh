@@ -279,8 +279,10 @@ ffmpeg_min_size_mb() {
 ffmpeg_min_write_build_txt() {
     local out="$1" builddir="$2" platform="$3"
     local cc_ver nasm_ver
-    cc_ver="$("${CC:-cc}" --version 2>/dev/null | head -n 1)"
-    nasm_ver="$(nasm -v 2>/dev/null | head -n 1)"
+    # nasm 只在 x86 构建里必需；universal/release 这类只打包的 job 没有 nasm，
+    # 这里必须容忍命令缺失（set -euo pipefail 下否则会直接退出 127）。
+    cc_ver="$("${CC:-cc}" --version 2>/dev/null | head -n 1 || true)"
+    nasm_ver="$(nasm -v 2>/dev/null | head -n 1 || true)"
 
     {
         echo "FFmpeg minimal build — LGPL-2.1-or-later"
