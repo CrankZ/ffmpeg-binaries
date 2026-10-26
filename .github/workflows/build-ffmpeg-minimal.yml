@@ -134,13 +134,14 @@ jobs:
             --binary work/build/win-x64/ffmpeg.exe \
             --platform win-x64
 
-      - name: 上传产物
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      # 用 cache 而不是 artifact 在 job 间传产物：不受 artifact 配额限制，也省一次压缩上传
+      - name: 保存产物到缓存（供 compare / release 使用）
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          name: win-minimal-zip
-          path: work/dist/ffmpeg-win-x64.zip
-          if-no-files-found: error
-          retention-days: 14
+          path: |
+            work/dist/ffmpeg-win-x64.zip
+            work/build/win-x64/ffmpeg.exe
+          key: xfer-win-min-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
 
   # 全量参考构建单独占一个 runner，和 minimal 并行；产物按版本缓存，重跑可直接复用。
   win-reference:
@@ -202,13 +203,11 @@ jobs:
         shell: msys2 {0}
         run: work/build/ref-win-x64/ffmpeg.exe -hide_banner -version | head -n 1
 
-      - name: 上传参考产物
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: 保存参考产物到缓存
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          name: win-reference-bin
           path: work/build/ref-win-x64/ffmpeg.exe
-          if-no-files-found: error
-          retention-days: 14
+          key: xfer-win-ref-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
 
   win-compare:
     name: Windows PCM 一致性 + 解码耗时对比
@@ -221,28 +220,28 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 下载 minimal 产物
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: 恢复 minimal 产物
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          name: win-minimal-zip
-          path: dl/min
+          path: |
+            work/dist/ffmpeg-win-x64.zip
+            work/build/win-x64/ffmpeg.exe
+          key: xfer-win-min-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
+          fail-on-cache-miss: true
 
-      - name: 下载参考产物
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: 恢复参考产物
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          name: win-reference-bin
-          path: dl/ref
-
-      - name: 解压 minimal 产物
-        shell: pwsh
-        run: Expand-Archive -Path dl/min/ffmpeg-win-x64.zip -DestinationPath work/build/win-x64 -Force
+          path: work/build/ref-win-x64/ffmpeg.exe
+          key: xfer-win-ref-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
+          fail-on-cache-miss: true
 
       - name: PCM 一致性 + 解码耗时对比
         shell: bash
         run: |
           bash scripts/ffmpeg-minimal/compare-pcm.sh \
             --minimal   work/build/win-x64/ffmpeg.exe \
-            --reference dl/ref/ffmpeg.exe
+            --reference work/build/ref-win-x64/ffmpeg.exe
 
   # ===========================================================================
   # macOS 用 macos-15 (Apple Silicon) 编 arm64，并在同一镜像上交叉编 x86_64；
@@ -289,23 +288,14 @@ jobs:
             --binary work/build/macos-arm64/ffmpeg \
             --platform macos-arm64 --archs arm64
 
-      - name: 上传可执行文件（供 universal / compare 使用）
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: 保存产物到缓存（供 universal / compare / release 使用）
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          name: macos-arm64-bin
           path: |
             work/build/macos-arm64/ffmpeg
             work/build/macos-arm64/configure.cmd
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: 上传产物
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: macos-arm64-zip
-          path: work/dist/ffmpeg-macos-arm64.zip
-          if-no-files-found: error
-          retention-days: 14
+            work/dist/ffmpeg-macos-arm64.zip
+          key: xfer-macos-arm64-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
 
   macos-x64:
     name: macOS x86_64 minimal（Rosetta 验证）
@@ -353,23 +343,14 @@ jobs:
             --binary work/build/macos-x86_64/ffmpeg \
             --platform macos-x64 --archs x86_64 --quick
 
-      - name: 上传可执行文件（供 universal 使用）
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: 保存产物到缓存（供 universal / release 使用）
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          name: macos-x64-bin
           path: |
             work/build/macos-x86_64/ffmpeg
             work/build/macos-x86_64/configure.cmd
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: 上传产物
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: macos-x64-zip
-          path: work/dist/ffmpeg-macos-x64.zip
-          if-no-files-found: error
-          retention-days: 14
+            work/dist/ffmpeg-macos-x64.zip
+          key: xfer-macos-x64-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
 
   macos-universal:
     name: macOS universal（lipo）
@@ -381,17 +362,25 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 下载 arm64 切片
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: 恢复 arm64 切片
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          name: macos-arm64-bin
-          path: work/build/macos-arm64
+          path: |
+            work/build/macos-arm64/ffmpeg
+            work/build/macos-arm64/configure.cmd
+            work/dist/ffmpeg-macos-arm64.zip
+          key: xfer-macos-arm64-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
+          fail-on-cache-miss: true
 
-      - name: 下载 x86_64 切片
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: 恢复 x86_64 切片
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          name: macos-x64-bin
-          path: work/build/macos-x86_64
+          path: |
+            work/build/macos-x86_64/ffmpeg
+            work/build/macos-x86_64/configure.cmd
+            work/dist/ffmpeg-macos-x64.zip
+          key: xfer-macos-x64-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
+          fail-on-cache-miss: true
 
       - name: 缓存 FFmpeg 源码（LICENSE / BUILD.txt）
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -415,13 +404,11 @@ jobs:
             --binary work/build/macos-universal/ffmpeg \
             --platform macos-universal --archs arm64,x86_64 --quick
 
-      - name: 上传产物
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: 保存 universal 产物到缓存
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          name: macos-universal-zip
           path: work/dist/ffmpeg-macos-universal.zip
-          if-no-files-found: error
-          retention-days: 14
+          key: xfer-macos-universal-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
 
   macos-reference:
     name: macOS arm64 reference（全量对照，不发布）
@@ -469,13 +456,11 @@ jobs:
       - name: 确认参考版可运行
         run: work/build/ref-macos-arm64/ffmpeg -hide_banner -version | head -n 1
 
-      - name: 上传参考产物
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: 保存参考产物到缓存
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          name: macos-reference-bin
           path: work/build/ref-macos-arm64/ffmpeg
-          if-no-files-found: error
-          retention-days: 14
+          key: xfer-macos-ref-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
 
   macos-compare:
     name: macOS PCM 一致性 + 解码耗时对比
@@ -488,26 +473,31 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 下载 minimal 切片
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: 恢复 minimal 切片
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          name: macos-arm64-bin
-          path: work/build/macos-arm64
+          path: |
+            work/build/macos-arm64/ffmpeg
+            work/build/macos-arm64/configure.cmd
+            work/dist/ffmpeg-macos-arm64.zip
+          key: xfer-macos-arm64-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
+          fail-on-cache-miss: true
 
-      - name: 下载参考产物
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: 恢复参考产物
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          name: macos-reference-bin
-          path: dl/ref
+          path: work/build/ref-macos-arm64/ffmpeg
+          key: xfer-macos-ref-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
+          fail-on-cache-miss: true
 
-      - name: 恢复可执行权限（artifact 不保留文件模式）
-        run: chmod +x work/build/macos-arm64/ffmpeg dl/ref/ffmpeg
+      - name: 恢复可执行权限（缓存归档在部分文件系统上可能丢失模式）
+        run: chmod +x work/build/macos-arm64/ffmpeg work/build/ref-macos-arm64/ffmpeg
 
       - name: 对比
         run: |
           bash scripts/ffmpeg-minimal/compare-pcm.sh \
             --minimal   work/build/macos-arm64/ffmpeg \
-            --reference dl/ref/ffmpeg
+            --reference work/build/ref-macos-arm64/ffmpeg
 
   # ===========================================================================
   release:
@@ -540,17 +530,46 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 收集产物
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: 恢复 Windows 产物
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          pattern: '*-zip'
-          path: dist
-          merge-multiple: true
+          path: |
+            work/dist/ffmpeg-win-x64.zip
+            work/build/win-x64/ffmpeg.exe
+          key: xfer-win-min-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
+          fail-on-cache-miss: true
+
+      - name: 恢复 macOS arm64 产物
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            work/build/macos-arm64/ffmpeg
+            work/build/macos-arm64/configure.cmd
+            work/dist/ffmpeg-macos-arm64.zip
+          key: xfer-macos-arm64-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
+          fail-on-cache-miss: true
+
+      - name: 恢复 macOS x86_64 产物
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            work/build/macos-x86_64/ffmpeg
+            work/build/macos-x86_64/configure.cmd
+            work/dist/ffmpeg-macos-x64.zip
+          key: xfer-macos-x64-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
+          fail-on-cache-miss: true
+
+      - name: 恢复 macOS universal 产物
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: work/dist/ffmpeg-macos-universal.zip
+          key: xfer-macos-universal-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.ffmpeg_version }}
+          fail-on-cache-miss: true
 
       - name: 生成 SHA256SUMS 与 Release 说明
         run: |
-          bash scripts/ffmpeg-minimal/release-notes.sh dist "${{ inputs.release_tag }}"
-          cat dist/SHA256SUMS.txt
+          bash scripts/ffmpeg-minimal/release-notes.sh work/dist "${{ inputs.release_tag }}"
+          cat work/dist/SHA256SUMS.txt
 
       - name: 创建/更新 Release
         env:
@@ -559,10 +578,10 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --notes-file dist/RELEASE_NOTES.md
+            gh release edit "$TAG" --notes-file work/dist/RELEASE_NOTES.md
           else
             gh release create "$TAG" \
               --title "FFmpeg minimal build (${{ inputs.ffmpeg_version }})" \
-              --notes-file dist/RELEASE_NOTES.md
+              --notes-file work/dist/RELEASE_NOTES.md
           fi
-          gh release upload "$TAG" dist/*.zip dist/SHA256SUMS.txt --clobber
+          gh release upload "$TAG" work/dist/*.zip work/dist/SHA256SUMS.txt --clobber
