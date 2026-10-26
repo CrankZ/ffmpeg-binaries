@@ -52,10 +52,22 @@ gh run watch
 
 | 输入 | 说明 |
 | --- | --- |
-| `ffmpeg_version` | 从哪里下载源码（`https://ffmpeg.org/releases/ffmpeg-<版本>.tar.xz`） |
+| `ffmpeg_version` | 从哪里下载源码（`https://ffmpeg.org/releases/ffmpeg-<版本>.tar.xz`），只允许数字和 `.` |
+| `ffmpeg_sha256` | 可选；填了就对源码 tar.xz 做强校验，留空则只记录实际 sha256 到 `BUILD.txt` |
 | `release_tag` | Release 名；4 个 zip + `SHA256SUMS.txt` 会发布到这个 tag |
-| `build_reference` | 是否额外构建一份同版本**全量**（默认组件全开）作对照，用于 PCM 一致性与解码耗时对比 |
+| `build_reference` | 是否额外构建一份同版本**全组件参考构建**（关闭 autodetect/网络，仅用于对照）做 PCM 一致性与解码耗时对比 |
 | `publish_release` | 是否发 Release（关掉就只在 Actions 里留 artifact） |
+
+流水线各构建 job **并行**执行（Windows minimal / Windows 参考 / macOS arm64 / macOS x86_64 /
+macOS 参考），universal 只做 lipo，最后由 release 汇总；同时带三类缓存：
+
+| 缓存 | 作用 |
+| --- | --- |
+| `work/dl` | FFmpeg 源码 tar.xz（按版本 + 平台） |
+| `.ccache` | ccache 对象缓存，重跑/换 tag 时大幅减少 make 时间 |
+| `work/build/ref-*` | 参考构建二进制，命中且版本一致时**整段跳过全量编译** |
+
+所有构建 job 只读仓库（`permissions: contents: read`），只有 release job 有 `contents: write`。
 
 ## 如何下载产物
 
@@ -63,8 +75,9 @@ gh run watch
 # 从 Release（推荐，带 sha256）
 gh release download ffmpeg-min-9.0.2 --pattern '*.zip' --dir ./dl
 
-# 或者从某次 run 的 artifact
-gh run download <run-id> -n windows-binaries -D ./dl
+# 或者从某次 run 的 artifact（各平台产物是独立 artifact）
+gh run download <run-id> -n win-minimal-zip -D ./dl
+gh run download <run-id> -n macos-arm64-zip -D ./dl
 ```
 
 ## 放进 Tauri 的 resources
@@ -97,17 +110,17 @@ let ffmpeg = app
 ## 仓库结构
 
 ```
-.github/workflows/build-ffmpeg-minimal.yml   流水线（windows / macos / release 三个 job）
+.github/workflows/build-ffmpeg-minimal.yml   流水线（validate / 各平台构建 / universal / compare / release）
 scripts/ffmpeg-minimal/
   components.sh        组件白名单唯一来源（三平台共用，禁止复制到别处）
-  common.sh            源码下载、configure 封装、全量参考构建、打包
-  build-msys2.sh       Windows x64 构建（MSYS2 MINGW64）
-  build-macos.sh       macOS arm64 / x86_64 / universal 构建
+  common.sh            源码下载与 sha256 校验、configure 封装、参考构建复用、打包
+  build-msys2.sh       Windows x64 构建（MSYS2 MINGW64；BUILD_TARGET=minimal|reference|all）
+  build-macos.sh       macOS 构建（BUILD_TARGET=arm64|x86_64|universal|reference|all）
   check-components.sh  构建前校验白名单里的组件名在目标版本里真实存在
-  verify.sh            验收：版本 / 静态依赖 / 架构 / 组件面 / 三种调用 / 体积
+  verify.sh            验收：版本 / 静态依赖 / 架构 / 组件面 / 三种调用 / 体积（--quick 快速冒烟）
   verify.ps1           Windows 本地版验收（含纯 PowerShell 的 PE 导入表解析）
-  compare-pcm.sh       与同版本全量构建比 PCM 一致性与解码耗时
-  release-notes.sh     生成 Release 说明与 SHA256SUMS
+  compare-pcm.sh       与同版本全组件参考构建比 PCM 一致性与解码耗时
+  release-notes.sh     生成 Release 说明与 SHA256SUMS（产物缺失/解析失败会直接失败）
 fixtures/              冒烟测试样本（覆盖白名单里的容器与音频编码）
 ```
 
@@ -155,33 +168,51 @@ FFmpeg 的构建系统不支持给单个文件加编译选项，而实测（CI r
 1. `ffmpeg -version` 正常输出，且配置行含 `--disable-everything`，不含 `--enable-small` / `--disable-asm`
 2. Windows：`objdump -p ffmpeg.exe` 的 `DLL Name` 只有系统 DLL（`api-ms-win-*` 视为系统 API Set）
 3. macOS：`otool -L` 只有系统库；`lipo -archs` 含期望架构；`minos >= 13.0`；已签名
-4. `fixtures/` 里每个样本逐个跑三种调用：PCM 非空、`-ac 1 -ar 16000` 真实生效（解析 wav 头）、`Duration:` 可解析
-5. 与同版本**全量构建**对同一文件输出 PCM 做 SHA256 对比，并比较解码耗时（差异需 < 5%，取多次最优）
+4. `fixtures/` 里每个样本逐个跑三种调用：PCM 非空、`-ac 1 -ar 16000` 真实生效（每个输出都解析 wav 头）、`Duration:` 可解析
+5. 与同版本**全组件参考构建**对同一文件输出 PCM 做 SHA256 对比，并比较解码耗时（差异需 < 5%，取多次最优）
 6. 产物体积与目标区间对比，写进 Release 说明
 
-> 对比 PCM 时统一输出 `-f wav` 后跳过固定 1024 字节头部再比裸数据 —— 因为最小化构建的
+> 对比 PCM 时统一输出 `-f wav`，解析 RIFF 的 `data` chunk 后只比裸 PCM —— 因为最小化构建的
 > muxer 白名单里只有 `wav` / `null`，故意不为了测试而多加一个 `s16le` muxer。
+> 之前固定跳过 1024 字节会把前约 0.5 秒漏掉，现改为按头部实际长度跳过。
 
 ## 本地构建
 
 Windows（MSYS2 MINGW64 shell）：
 
 ```bash
-pacman -S --needed base-devel mingw-w64-x86_64-toolchain mingw-w64-x86_64-nasm make pkgconf diffutils zip
+pacman -S --needed base-devel mingw-w64-x86_64-toolchain mingw-w64-x86_64-nasm \
+  mingw-w64-x86_64-ccache make pkgconf diffutils zip
+
+# 只构建 minimal；需要全量对照就设 BUILD_REFERENCE=true（或 BUILD_TARGET=reference）
 FFMPEG_VERSION=9.0.2 bash scripts/ffmpeg-minimal/build-msys2.sh
+
+# 可选：强校验源码哈希
+FFMPEG_VERSION=9.0.2 FFMPEG_SHA256=<64位十六进制> bash scripts/ffmpeg-minimal/build-msys2.sh
+
+# 可选：ccache 加速重复构建
+CCACHE_DIR="$PWD/.ccache" FFMPEG_VERSION=9.0.2 bash scripts/ffmpeg-minimal/build-msys2.sh
+
 powershell -File scripts/ffmpeg-minimal/verify.ps1 -Binary work/build/win-x64/ffmpeg.exe
 ```
 
 macOS：
 
 ```bash
-brew install nasm
+brew install nasm ccache
+
+# 默认一次构建 arm64 + x86_64 + universal；也可以只跑其中一项（CI 就是这么拆的）
 FFMPEG_VERSION=9.0.2 bash scripts/ffmpeg-minimal/build-macos.sh
+BUILD_TARGET=arm64    FFMPEG_VERSION=9.0.2 bash scripts/ffmpeg-minimal/build-macos.sh
+BUILD_TARGET=x86_64   FFMPEG_VERSION=9.0.2 bash scripts/ffmpeg-minimal/build-macos.sh
+BUILD_TARGET=universal FFMPEG_VERSION=9.0.2 bash scripts/ffmpeg-minimal/build-macos.sh
+
 bash scripts/ffmpeg-minimal/verify.sh --binary work/build/macos-arm64/ffmpeg \
   --platform macos-arm64 --archs arm64
 ```
 
-> 仓库必须是 public：私有仓库的 macOS runner 按 10 倍计费。
+> 仓库必须是 public：私有仓库的 macOS runner 按 10 倍计费；CI 把 macOS 拆成 3 个并行 job 后
+> runner 分钟数会上升，但 public 仓库不受影响。
 
 ## fixtures 覆盖情况
 

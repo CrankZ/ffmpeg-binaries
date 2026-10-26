@@ -5,13 +5,15 @@
 #   2) 解码耗时差异必须 < 5%（取多次运行最优值，降低 CI 噪声）
 #
 # 说明：最小化构建的白名单里只有 wav/null 两个 muxer（多一个都不该有），
-# 所以这里不用 `-f s16le`，而是统一输出 wav 后跳过固定 1024 字节头部再比 PCM，
-# 效果等价于比较 `-f s16le` 的裸数据。
+# 所以这里不用 `-f s16le`，而是统一输出 wav 后解析 RIFF 的 data chunk，
+# 只比裸 PCM，效果等价于 `-f s16le`。
 #
 # 用法: compare-pcm.sh --minimal BIN --reference BIN --fixtures DIR
 #                      [--tolerance 5] [--repeats 3]
 # =============================================================================
 set -uo pipefail
+# 耗时解析依赖 "秒.毫秒" 这种数字格式，避免 locale 把小数点变成逗号
+export LC_NUMERIC=C
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
@@ -45,35 +47,77 @@ done
 file_size() {
     if [ "$(uname -s)" = "Darwin" ]; then stat -f %z "$1"; else stat -c %s "$1"; fi
 }
-sha256_of_pcm() {  # 跳过 1024 字节头部，只对 PCM 数据取 sha256
-    tail -c +1025 "$1" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | awk '{print $1}'
+
+# 解析 RIFF/WAVE 的 data chunk，返回 PCM 数据起始的 0-based 偏移。
+# 以前固定跳过 1024 字节：wav 头实际只有 44~68 字节，会漏掉前约 0.5 秒 PCM。
+pcm_data_offset() {
+    local hex prefix
+    hex="$(od -A n -t x1 -N 4096 "$1" 2>/dev/null | tr -d ' \n\r')"
+    case "$hex" in
+        52494646*) ;;      # "RIFF"
+        *) echo 0; return ;;
+    esac
+    case "$hex" in
+        *57415645*) ;;     # "WAVE"
+        *) echo 0; return ;;
+    esac
+    prefix="${hex%%64617461*}"    # 第一个 "data"（hex 64617461）
+    [ "$prefix" != "$hex" ] || { echo 0; return; }
+    echo $(( ${#prefix} / 2 + 8 ))
 }
+
+pcm_size() {  # PCM 数据字节数（不含 wav 头）
+    local off
+    off="$(pcm_data_offset "$1")"
+    echo $(( $(file_size "$1") - off ))
+}
+
+sha256_of_pcm() {  # 只对 PCM 数据取 sha256
+    local off
+    off="$(pcm_data_offset "$1")"
+    tail -c +$((off + 1)) "$1" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | awk '{print $1}'
+}
+
+is_number() { printf '%s' "$1" | grep -qE '^[0-9]+([.][0-9]+)?$'; }
+
 # 交替测量 minimal / reference，避免"先测的那个吃亏"（CPU 降频、缓存冷热）
 time_both() {   # $1 = repeats, 其余 = 交给两个二进制共同的参数；结果写入 T_MIN / T_REF
     local n="$1" x
     shift
-    T_MIN=999; T_REF=999
+    T_MIN=""; T_REF=""
     TIMEFORMAT=%R
     for _ in $(seq 1 "$n"); do
         x=$( { time "$MINIMAL" "$@" >/dev/null 2>&1; } 2>&1 )
-        T_MIN=$(awk -v a="$x" -v b="$T_MIN" 'BEGIN { print (a+0 < b+0) ? a+0 : b+0 }')
+        is_number "$x" || return 1
+        if [ -z "$T_MIN" ]; then
+            T_MIN="$x"
+        else
+            T_MIN="$(awk -v a="$x" -v b="$T_MIN" 'BEGIN { print (a+0 < b+0) ? a+0 : b+0 }')"
+        fi
         x=$( { time "$REFERENCE" "$@" >/dev/null 2>&1; } 2>&1 )
-        T_REF=$(awk -v a="$x" -v b="$T_REF" 'BEGIN { print (a+0 < b+0) ? a+0 : b+0 }')
+        is_number "$x" || return 1
+        if [ -z "$T_REF" ]; then
+            T_REF="$x"
+        else
+            T_REF="$(awk -v a="$x" -v b="$T_REF" 'BEGIN { print (a+0 < b+0) ? a+0 : b+0 }')"
+        fi
     done
+    [ -n "$T_MIN" ] && [ -n "$T_REF" ]
 }
 
 # PCM 差异定位：首个不同字节偏移 + 不同字节数（只在 sha 不相等时调用）
 pcm_diff() {
-    local a="$1" b="$2" total changed first
-    total="$(file_size "$a")"
+    local a="$1" b="$2" oa ob total changed first
+    oa="$(pcm_data_offset "$a")"; ob="$(pcm_data_offset "$b")"
+    total="$(pcm_size "$a")"
     if command -v cmp >/dev/null 2>&1; then
-        cmp -l "$a" "$b" 2>/dev/null > "$TMP/cmp.txt" || true
+        cmp -l <(tail -c +$((oa + 1)) "$a") <(tail -c +$((ob + 1)) "$b") 2>/dev/null > "$TMP/cmp.txt" || true
         changed="$(wc -l < "$TMP/cmp.txt" | tr -d ' ')"
         first="$(head -n 1 "$TMP/cmp.txt" 2>/dev/null | awk '{print $1}')"
         printf 'PCM 长度 %s / %s，首个差异字节 @%s，差异字节数 %s\n' \
-            "$total" "$(file_size "$b")" "${first:-?}" "${changed:-0}"
+            "$total" "$(pcm_size "$b")" "${first:-?}" "${changed:-0}"
     else
-        printf 'PCM 长度 %s / %s（无 cmp，无法定位差异）\n' "$total" "$(file_size "$b")"
+        printf 'PCM 长度 %s / %s（无 cmp，无法定位差异）\n' "$total" "$(pcm_size "$b")"
     fi
 }
 
@@ -108,8 +152,8 @@ for f in "$FIXTURES"/tone*; do
         continue
     fi
 
-    smin="$(file_size "$o_min")"
-    sref="$(file_size "$o_ref")"
+    smin="$(pcm_size "$o_min")"
+    sref="$(pcm_size "$o_ref")"
     hmin="$(sha256_of_pcm "$o_min")"
     href="$(sha256_of_pcm "$o_ref")"
 
@@ -132,8 +176,11 @@ for f in "$FIXTURES"/tone*; do
         *) continue ;;
     esac
 
-    time_both "$REPEATS" -hide_banner -loglevel error -stream_loop "$PERF_LOOP" \
-        -i "$f" -vn -ac 1 -ar 16000 -f null -
+    if ! time_both "$REPEATS" -hide_banner -loglevel error -stream_loop "$PERF_LOOP" \
+            -i "$f" -vn -ac 1 -ar 16000 -f null -; then
+        bad "$name 耗时测量失败（无法解析 time 输出）"
+        continue
+    fi
     t_min="$T_MIN"; t_ref="$T_REF"
     delta="$(awk -v a="$t_min" -v b="$t_ref" 'BEGIN { if (b+0 <= 0) print "n/a"; else printf "%.1f", (a-b)*100.0/b }')"
 

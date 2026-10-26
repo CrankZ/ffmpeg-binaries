@@ -31,12 +31,59 @@ ffmpeg_min_sha256() {
 }
 
 # -----------------------------------------------------------------------------
+# ccache：仅当设置了 CCACHE_DIR 时启用（CI 里由 actions/cache 提供）
+# 结果写入全局数组 FFMPEG_MIN_CC_ARGS；用 ${arr[@]+"${arr[@]}"} 展开以兼容
+# macOS 自带的 bash 3.2（set -u 下展开空数组会报 unbound variable）。
+#   $1 = 默认编译器（gcc / clang）
+# -----------------------------------------------------------------------------
+ffmpeg_min_cc_args() {
+    local compiler="$1"
+    FFMPEG_MIN_CC_ARGS=()
+    if [ -n "${CCACHE_DIR:-}" ]; then
+        command -v ccache >/dev/null 2>&1 ||
+            ffmpeg_min_die "设置了 CCACHE_DIR 但找不到 ccache，请先安装 ccache"
+        FFMPEG_MIN_CC_ARGS=(--cc="ccache $compiler")
+        # CC 只记录真实编译器（不含 ccache 包装），供 BUILD.txt 取版本号
+        export CC="$compiler"
+    fi
+}
+
+# 可执行文件名（用于缓存的参考构建是否可直接复用）
+ffmpeg_min_bin_name() {
+    if [ "$(uname -s)" = "Darwin" ]; then
+        echo "ffmpeg"
+    else
+        echo "ffmpeg.exe"
+    fi
+}
+
+# 参考构建复用：CI 会缓存 ref-* 目录，命中且版本正确时跳过全量编译（最贵的一步）。
+#   $1 = 构建目录，$2 = 期望版本；返回 0 表示可直接复用
+# 需要 REUSE_REFERENCE=true 才启用，避免本地改配置后误用旧缓存。
+ffmpeg_min_reference_reuse() {
+    local builddir="$1" version="$2" bin
+    [ "${REUSE_REFERENCE:-false}" = "true" ] || return 1
+    bin="$builddir/$(ffmpeg_min_bin_name)"
+    [ -x "$bin" ] || return 1
+    "$bin" -version 2>/dev/null | grep -q "ffmpeg version $version" || {
+        ffmpeg_min_warn "缓存的参考构建版本不符，重新构建: $bin"
+        return 1
+    }
+    ffmpeg_min_log "复用缓存的参考构建: $bin"
+}
+
+# -----------------------------------------------------------------------------
 # 下载 + 解压源码，设置全局变量：
 #   FFMPEG_TARBALL / FFMPEG_SOURCE_SHA256 / FFMPEG_SRC
 # -----------------------------------------------------------------------------
 ffmpeg_min_source() {
     local version="$1" work="$2"
     [ -n "$version" ] || ffmpeg_min_die "FFMPEG_VERSION 为空"
+    # 版本号会参与 URL / 缓存 key / 解压路径，只允许常规版本文本
+    case "$version" in
+        *[!0-9A-Za-z._-]*|.*|*..*)
+            ffmpeg_min_die "FFMPEG_VERSION 非法: $version（只允许字母数字 . _ -）" ;;
+    esac
 
     local dl="$work/dl" srcroot="$work/src"
     mkdir -p "$dl" "$srcroot"
@@ -51,6 +98,15 @@ ffmpeg_min_source() {
     fi
 
     FFMPEG_SOURCE_SHA256="$(ffmpeg_min_sha256 "$FFMPEG_TARBALL")"
+    # 可选：强校验源码哈希，避免缓存/镜像被篡改导致产物不可复现
+    if [ -n "${FFMPEG_SHA256:-}" ]; then
+        local want actual
+        want="$(printf '%s' "$FFMPEG_SHA256" | tr 'A-Z' 'a-z')"
+        actual="$(printf '%s' "$FFMPEG_SOURCE_SHA256" | tr 'A-Z' 'a-z')"
+        [ "$want" = "$actual" ] ||
+            ffmpeg_min_die "源码 sha256 不匹配: 期望 $want, 实际 $actual"
+        ffmpeg_min_log "源码 sha256 校验通过: $actual"
+    fi
     FFMPEG_SRC="$srcroot/ffmpeg-$version"
     if [ ! -d "$FFMPEG_SRC" ]; then
         ffmpeg_min_log "解压源码"
@@ -189,7 +245,7 @@ ffmpeg_min_write_build_txt() {
         if [ -f "$builddir/configure.cmd" ]; then
             sed 's/^/  /' "$builddir/configure.cmd"
         else
-            echo "  ./configure ${CONFIGURE_ARGS[*]}"
+            echo "  ./configure ${CONFIGURE_ARGS[*]:-（见各架构 configure.cmd）}"
         fi
         echo
         echo "说明: 静态链接，无第三方运行时依赖；--disable-gpl --disable-nonfree"

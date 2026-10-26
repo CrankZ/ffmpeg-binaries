@@ -4,8 +4,9 @@
 #
 # 用法:
 #   verify.sh --binary PATH --platform win-x64|macos-arm64|macos-x64|macos-universal
-#             [--fixtures DIR] [--archs arm64,x86_64]
+#             [--fixtures DIR] [--archs arm64,x86_64] [--quick]
 #
+# --quick 只跑前 3 个 fixture（用于 x86_64 / universal 这类冒烟成本高的产物）
 # 任何一项不通过 -> 退出码非 0（CI 里即整个 job 失败）
 # =============================================================================
 set -uo pipefail
@@ -18,6 +19,7 @@ BIN=""
 PLATFORM=""
 FIXTURES="$HERE/../../fixtures"
 EXPECT_ARCHS=""
+QUICK=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -25,7 +27,8 @@ while [ $# -gt 0 ]; do
         --platform) PLATFORM="$2"; shift 2 ;;
         --fixtures) FIXTURES="$2"; shift 2 ;;
         --archs)    EXPECT_ARCHS="$2"; shift 2 ;;
-        -h|--help)  sed -n '2,12p' "$0"; exit 0 ;;
+        --quick)    QUICK=1; shift ;;
+        -h|--help)  sed -n '2,15p' "$0"; exit 0 ;;
         *) echo "未知参数: $1" >&2; exit 2 ;;
     esac
 done
@@ -290,6 +293,37 @@ else
     ok "无网络协议"
 fi
 
+# 校验 wav 头里的 mono / 16000（fmt 块从偏移 12 开始；兼容 PCM 与 EXTENSIBLE）
+wav_fmt_check() {  # $1=wav 文件 $2=说明；不通过时直接计入 FAILS
+    local f="$1" label="$2" hex ch rate
+    if [ ! -s "$f" ]; then
+        bad "$label 输出为空"
+        return 1
+    fi
+    hex="$(od -A n -t x1 -N 40 "$f" 2>/dev/null | tr -d ' \n\r')"
+    if [ "${#hex}" -lt 56 ]; then
+        bad "$label 头部不足 28 字节，无法解析 wav fmt"
+        return 1
+    fi
+    if [ "${hex:0:8}" != "52494646" ] || [ "${hex:16:8}" != "57415645" ]; then
+        bad "$label 不是 RIFF/WAVE"
+        return 1
+    fi
+    if [ "${hex:24:8}" != "666d7420" ]; then   # 偏移 12 处是 "fmt "
+        bad "$label 缺少 fmt 块"
+        return 1
+    fi
+    # 0-based: 22=channels(2) 24=sampleRate(4)，小端
+    ch=$(( 0x${hex:44:2} + 256 * 0x${hex:46:2} ))
+    rate=$(( 0x${hex:48:2} + 256 * 0x${hex:50:2} \
+           + 65536 * 0x${hex:52:2} + 16777216 * 0x${hex:54:2} ))
+    if [ "$ch" = "1" ] && [ "$rate" = "16000" ]; then
+        return 0
+    fi
+    bad "$label -ac 1 -ar 16000 未生效（wav 头: ${ch}ch / ${rate}Hz）"
+    return 1
+}
+
 # =============================================================================
 title 5/6 "三种实际调用逐个 fixture 冒烟"
 # =============================================================================
@@ -303,6 +337,9 @@ for f in "$FIXTURES"/*; do
         tone*) ;;
         *) continue ;;
     esac
+    if [ "$QUICK" -eq 1 ] && [ "$TOTAL_FIX" -ge 3 ]; then
+        break
+    fi
     TOTAL_FIX=$((TOTAL_FIX + 1))
 
     # ---- 1) 管道提取（主力路径）----
@@ -313,6 +350,7 @@ for f in "$FIXTURES"/*; do
         # 5s 单声道 16k PCM ≈ 160000 字节；允许 ±35%
         if [ "$sz" -gt 32000 ] && [ "$sz" -lt 216000 ]; then
             ok "$name 管道提取 -> $sz bytes"
+            wav_fmt_check "$out1" "$name 管道提取" || true
         else
             bad "$name 管道提取输出大小异常: $sz bytes"
             FIX_FAIL=$((FIX_FAIL + 1))
@@ -330,6 +368,7 @@ for f in "$FIXTURES"/*; do
         sz2="$(file_size "$out2")"
         if [ "$sz2" -gt 32000 ]; then
             ok "$name 预转 WAV 文件 -> $sz2 bytes"
+            wav_fmt_check "$out2" "$name 预转 WAV 文件" || true
         else
             bad "$name 预转 WAV 文件输出太小: $sz2 bytes"
             FIX_FAIL=$((FIX_FAIL + 1))
@@ -359,7 +398,7 @@ for f in "$FIXTURES"/*; do
     fi
 done
 
-# ---- 4) -t 截断 + 采样参数真实生效（用固定 44 字节头布局校验）----
+# ---- 4) -t 截断 + 采样参数真实生效 ----
 FIRST="$(ls "$FIXTURES"/*.mp4 2>/dev/null | head -n 1)"
 [ -n "$FIRST" ] || FIRST="$(ls "$FIXTURES"/*.wav 2>/dev/null | head -n 1)"
 if [ -n "$FIRST" ]; then
@@ -369,30 +408,12 @@ if [ -n "$FIRST" ]; then
         t_sz="$(file_size "$t_out")"
         if [ "$t_sz" -gt 40000 ] && [ "$t_sz" -lt 90000 ]; then
             ok "-t 2 截断生效（$(basename "$FIRST") -> $t_sz bytes，约 2s）"
+            wav_fmt_check "$t_out" "-t 2 输出" || true
         else
             bad "-t 2 截断异常: $t_sz bytes"
         fi
     else
         bad "-t 2 截断调用失败"
-    fi
-fi
-
-# 校验 wav 头里的 channels=1 / sample_rate=16000（fmt 块固定在偏移 12）
-# 用 od 的十六进制输出 + bash 的 0x 解析，避免 GNU/BSD od 在 -t u1 多字段时的差异
-wav_byte() {  # $1 = 1-based 字节序号，读全局 WAV_HEX
-    printf '%d' "0x${WAV_HEX:$(( ($1 - 1) * 2 )):2}"
-}
-if [ -s "$TMP/t.wav" ]; then
-    WAV_HEX="$(od -A n -t x1 -N 40 "$TMP/t.wav" | tr -d ' \n\r')"
-    # 布局: RIFF(4)+size(4)+WAVE(4)+"fmt "(4)+fmtsize(4) 之后
-    #   = 0 基偏移 20: audioFormat(2)  22: channels(2)  24: sampleRate(4)
-    ch=$(( $(wav_byte 23) + 256 * $(wav_byte 24) ))
-    rate=$(( $(wav_byte 25) + 256 * $(wav_byte 26) \
-           + 65536 * $(wav_byte 27) + 16777216 * $(wav_byte 28) ))
-    if [ "$ch" = "1" ] && [ "$rate" = "16000" ]; then
-        ok "-ac 1 -ar 16000 实际生效（wav 头: ${ch}ch / ${rate}Hz）"
-    else
-        bad "-ac 1 -ar 16000 未生效（wav 头: ${ch}ch / ${rate}Hz）"
     fi
 fi
 info "共 $TOTAL_FIX 个 fixture，失败 $FIX_FAIL 项"

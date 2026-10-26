@@ -80,7 +80,7 @@ ffmpeg_min_components_args() {
 #   * 禁止 --disable-asm（会让 x86 掉到 C 实现）
 #   * 保留 pthreads、保留 runtime cpudetect
 #   * 体积只能来自"组件裁剪 + strip"
-# 这里显式写死 -O2，并用 --optflags 覆盖 FFmpeg 默认的 -O3/-Os 选择逻辑。
+# 这里统一使用官方默认的 -O3，并用 --optflags 显式覆盖 ffbuild 的优化等级选择逻辑。
 # =============================================================================
 ffmpeg_min_common_args() {
     FFMPEG_MIN_COMMON_ARGS=(
