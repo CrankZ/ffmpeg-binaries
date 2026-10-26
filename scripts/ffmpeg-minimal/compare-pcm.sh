@@ -2,14 +2,14 @@
 # =============================================================================
 # 与"同版本官方全量构建"对比：
 #   1) 同一输入解码成裸 PCM（单声道 16k）后采样数据必须完全一致
-#   2) 解码耗时差异必须 < 5%（单线程墙钟；先预热丢弃一轮，再测偶数轮并交替顺序）
+#   2) 解码耗时差异必须 < 5%（单线程 + ffmpeg 自带 -benchmark 的 utime，交替顺序多轮累计）
 #      为什么这样测：
 #        * -threads 1：多线程解码的调度抖动会让单轮波动达 20-30%，两个构建的线程实现
 #          完全相同，单线程才能隔离出代码路径本身的差异；
-#        * 测墙钟而不是 CPU 时间：Windows 的 Git Bash 不支持 TIMEFORMAT 的 %U；
-#        * 预热 + 交替顺序 + 偶数轮累计耗时比值：实测"同一对里后跑的那个快约 30%"
-#          （CPU 升频 / 页缓存），先跑一轮丢弃做预热；测量轮数取偶数，保证两个二进制
-#          各占一半"先跑"名额，累计耗时比值恰好抵消顺序偏差。
+#        * 指标用 ffmpeg 自己打印的 `bench: utime=...`（用户态 CPU 时间）：
+#          墙钟会被宿主抢占/CPU 降频放大到 ±30%，CPU 时间只统计真实执行；
+#          用 -benchmark 而不是 bash time，是因为 Windows Git Bash 不支持 TIMEFORMAT 的 %U；
+#        * 预热 + 交替顺序 + 偶数轮累计耗时比值：抵消"同一对里后跑的那个更快"的顺序偏差。
 #
 # 说明：最小化构建的白名单里只有 wav/null 两个 muxer（多一个都不该有），
 # 所以这里不用 `-f s16le`，而是统一输出 wav 后解析 RIFF 的 data chunk，
@@ -61,12 +61,20 @@ sha256_of_pcm() {  # 只对 PCM 数据取 sha256
     tail -c +$((off + 1)) "$1" | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; } | awk '{print $1}'
 }
 
-# 单次计时：$1=二进制，其余=参数；把墙钟秒数打印到 stdout，解析失败返回 1
+# 单次计时：$1=二进制，其余=参数；输出该次解码的用户态 CPU 秒数（ffmpeg -benchmark 的 utime）
+# 不用 bash 的 time：Windows Git Bash 不支持 TIMEFORMAT 的 %U，且墙钟受宿主抢占影响大。
 time_one() {
-    local bin="$1" t
+    local bin="$1" out t
     shift
-    t=$( { time "$bin" "$@" >/dev/null 2>&1; } 2>&1 )
-    ffmpeg_min_is_number "$t" || { printf 'time 输出无法解析: [%s]\n' "$t" >&2; return 1; }
+    out=$( { "$bin" -benchmark "$@" >/dev/null; } 2>&1 ) || {
+        printf '解码失败（%s）: %s\n' "$bin" "$(printf '%s\n' "$out" | tail -n 1)" >&2
+        return 1
+    }
+    t="$(printf '%s\n' "$out" | sed -n 's/^bench: utime=\([0-9.][0-9.]*\)s.*/\1/p' | tail -n 1)"
+    ffmpeg_min_is_number "$t" || {
+        printf 'benchmark 输出无法解析: [%s]\n' "$(printf '%s\n' "$out" | grep 'bench:' | tail -n 1)" >&2
+        return 1
+    }
     printf '%s\n' "$t"
 }
 
@@ -79,7 +87,6 @@ time_both() {   # $1 = repeats, 其余 = 交给两个二进制共同的参数
     local n="$1" i=0 x y r s_min=0 s_ref=0
     shift
     AVG_MIN=""; AVG_REF=""; RATIOS=""; RATIO=""
-    TIMEFORMAT=%R
     # 预热（丢弃）
     time_one "$MINIMAL" "$@" >/dev/null || return 1
     time_one "$REFERENCE" "$@" >/dev/null || return 1
@@ -133,7 +140,7 @@ trap 'rm -rf "$TMP"' EXIT
 printf '\033[1mPCM 一致性 + 解码耗时对比\033[0m\n'
 printf '  minimal   : %s\n' "$MINIMAL"
 printf '  reference : %s\n' "$REFERENCE"
-printf '  容差      : %s%%（单线程墙钟，预热 1 轮丢弃，%s 轮交替顺序按累计耗时比值判定，-stream_loop %s）\n\n' "$TOLERANCE" "$REPEATS" "$PERF_LOOP"
+printf '  容差      : %s%%（单线程 CPU 时间（-benchmark utime），预热 1 轮丢弃，%s 轮交替顺序按累计比值判定，-stream_loop %s）\n\n' "$TOLERANCE" "$REPEATS" "$PERF_LOOP"
 printf '  %-18s %12s %12s %18s %s\n' "fixture" "PCM(min)" "PCM(ref)" "PCM sha256" "结果"
 
 for f in "$FIXTURES"/tone*; do
@@ -189,9 +196,9 @@ for f in "$FIXTURES"/tone*; do
         *) continue ;;
     esac
 
-    if ! time_both "$REPEATS" -hide_banner -loglevel error -threads 1 -stream_loop "$PERF_LOOP" \
+    if ! time_both "$REPEATS" -hide_banner -loglevel info -threads 1 -stream_loop "$PERF_LOOP" \
             -i "$f" -vn -ac 1 -ar 16000 -f null -; then
-        bad "$name 耗时测量失败（无法解析 time 输出）"
+        bad "$name 耗时测量失败（无法解析 -benchmark 输出）"
         continue
     fi
     t_min="$AVG_MIN"; t_ref="$AVG_REF"
